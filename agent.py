@@ -116,11 +116,17 @@ def run_agent():
         print("No signals collected")
         return
 
-    # 1) Update existing paper trades against the latest prices.
+    # 1) Update existing paper trades; ping Telegram for any that closed.
     price_map = {s["coin"]: s["price"] for s in signals}
     closed = paper_trading.update_open_trades(price_map)
-    if closed:
-        print(f"Closed {closed} paper trade(s) this scan")
+    for t in closed:
+        mark = "WIN" if t["result"] == "WIN" else "LOSS"
+        emoji = "✅" if t["result"] == "WIN" else "❌"
+        print(f"Trade closed: {t['coin']} {t['direction']} {mark} {t['pnl_pct']}%")
+        asyncio.run(send_alert(
+            f"{emoji} {mark}  {t['coin']}  {t['direction']}\n"
+            f"Result: {t['pnl_pct']}%"
+        ))
 
     # 2) Find every qualifying signal, best first.
     qualified = sorted(
@@ -172,42 +178,20 @@ Price: {best['price']}
 """
     )
 
-    # 5) Only ping Telegram when the top signal changes (no repeat spam).
+    # 5) Ping Telegram with the TOP 3 signals, but only when the #1 changes
+    #    (so you see more opportunities without repeat spam).
     if is_new_alert(best["coin"], best["direction"]):
-        message = f"""
+        lines = ["CRYPTO AGENT - TOP SIGNALS\n"]
+        for i, s in enumerate(qualified[:3], 1):
+            tr = calculate_trade(s["price"], s["direction"], s["atr"])
+            lines.append(
+                f"{i}) {s['coin']}  {s['direction']}  {s['confidence']}%\n"
+                f"   Entry {tr['entry']}\n"
+                f"   Stop  {tr['stop']}\n"
+                f"   TP1   {tr['tp1']}   TP2 {tr['tp2']}\n"
+            )
+        message = "\n".join(lines)
 
-CRYPTO AGENT SIGNAL
-
-Coin:
-{best['coin']}
-
-Direction:
-{best['direction']}
-
-Confidence:
-{best['confidence']}%
-
-Regime:
-{best['regime']}
-
-Quality:
-{best['quality']}
-
-RSI:
-{round(best['rsi'], 2)}
-
-Entry:
-{trade['entry']}
-
-Stop:
-{trade['stop']}
-
-TP1:
-{trade['tp1']}
-
-TP2:
-{trade['tp2']}
-"""
         asyncio.run(send_alert(message))
         record_alert(best["coin"], best["direction"], best["confidence"])
         print(message)

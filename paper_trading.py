@@ -4,7 +4,7 @@ how we measure whether the signals actually work - no real money involved.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 DB = "database/crypto.db"
@@ -15,7 +15,7 @@ def _conn():
 
 
 def _now():
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def has_open_trade(coin, direction):
@@ -56,7 +56,7 @@ def update_open_trades(price_map):
         "SELECT id, coin, direction, entry, stop, tp1 FROM paper_trades WHERE status='OPEN'"
     ).fetchall()
 
-    closed = 0
+    closed = []
     for tid, coin, direction, entry, stop, tp1 in rows:
         price = price_map.get(coin)
         if price is None or not entry:  # skip missing price or bad (zero) entry
@@ -80,15 +80,21 @@ def update_open_trades(price_map):
             pnl = (exit_price - entry) / entry * 100.0
             if direction == "SHORT":
                 pnl = -pnl
+            pnl = round(pnl, 2)
             conn.execute(
                 "UPDATE paper_trades SET status=?, closed_at=?, exit_price=?, pnl_pct=? WHERE id=?",
-                (outcome, _now(), exit_price, round(pnl, 2), tid),
+                (outcome, _now(), exit_price, pnl, tid),
             )
-            closed += 1
+            closed.append({
+                "coin": coin,
+                "direction": direction,
+                "result": outcome,
+                "pnl_pct": pnl,
+            })
 
     conn.commit()
     conn.close()
-    return closed
+    return closed  # list of closed-trade dicts
 
 
 def get_stats():

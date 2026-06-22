@@ -6,6 +6,12 @@ on:
     - cron: "*/15 * * * *"   # every 15 minutes (public repo = unlimited free minutes)
   workflow_dispatch: {}       # also lets you run it manually from the website
 
+# Needed to publish the dashboard to GitHub Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -22,8 +28,8 @@ jobs:
       - name: Install libraries
         run: pip install -r requirements.txt
 
-      # Remember past signals between runs so the same coin isn't re-alerted.
-      - name: Restore signal history
+      # Remember past signals/trades between runs.
+      - name: Restore data
         uses: actions/cache@v4
         with:
           path: database/crypto.db
@@ -38,3 +44,22 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scan_once.py
+
+      - name: Build dashboard
+        run: python build_dashboard.py
+
+      - name: Upload dashboard for Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: scan
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
