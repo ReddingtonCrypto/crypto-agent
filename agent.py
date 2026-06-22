@@ -14,8 +14,8 @@ from confidence_engine import calculate_confidence
 from regime_engine import get_regime
 from market_filter import market_quality
 
-exchange = ccxt.okx({
-    "enableRateLimit": True,   # space out requests so OKX doesn't temp-ban us
+exchange = ccxt.binanceus({
+    "enableRateLimit": True,   # space out requests so the exchange doesn't temp-ban us
     "timeout": 30000,          # 30s per request before giving up
 })
 
@@ -102,7 +102,7 @@ def run_agent():
     print("==============================\n")
 
     coins = universe.get_universe(exchange, limit=100)
-    print(f"Watching {len(coins)} coins (top by market cap, tradeable on OKX)\n")
+    print(f"Watching {len(coins)} coins (top by market cap, tradeable on {exchange.id})\n")
 
     signals = []
     for coin in coins:

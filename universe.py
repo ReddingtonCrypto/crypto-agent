@@ -29,22 +29,23 @@ FALLBACK = [
 ]
 
 
-def _read_cache():
+def _read_symbols_cache():
+    """Cached CoinGecko top symbols (exchange-independent), e.g. ['BTC','ETH']."""
     try:
         with open(CACHE_FILE) as f:
             data = json.load(f)
-        if time.time() - data.get("saved_at", 0) < CACHE_TTL and data.get("pairs"):
-            return data["pairs"]
+        if time.time() - data.get("saved_at", 0) < CACHE_TTL and data.get("symbols"):
+            return data["symbols"]
     except Exception:
         pass
     return None
 
 
-def _save_cache(pairs):
+def _save_symbols_cache(symbols):
     try:
         os.makedirs("data", exist_ok=True)
         with open(CACHE_FILE, "w") as f:
-            json.dump({"saved_at": time.time(), "pairs": pairs}, f)
+            json.dump({"saved_at": time.time(), "symbols": symbols}, f)
     except Exception:
         pass
 
@@ -62,23 +63,24 @@ def _coingecko_top(limit):
 
 
 def get_universe(exchange, limit=100):
-    """Return a list like ['BTC/USDT', 'ETH/USDT', ...] of the top `limit`
-    coins by market cap that OKX supports as spot USDT pairs."""
+    """Return ['BTC/USDT', ...]: the top `limit` coins by market cap that the
+    given exchange supports as spot USDT pairs. The market-cap list is cached
+    (exchange-independent); the intersection is recomputed for whichever
+    exchange is passed in, so switching exchanges Just Works."""
 
-    cached = _read_cache()
-    if cached:
-        return cached
-
-    try:
-        symbols = _coingecko_top(limit)
-    except Exception as e:
-        print(f"CoinGecko unavailable ({type(e).__name__}); using fallback list.")
-        return _read_cache() or FALLBACK
+    symbols = _read_symbols_cache()
+    if symbols is None:
+        try:
+            symbols = _coingecko_top(limit)
+            _save_symbols_cache(symbols)
+        except Exception as e:
+            print(f"CoinGecko unavailable ({type(e).__name__}); using fallback list.")
+            symbols = [p.split("/")[0] for p in FALLBACK]
 
     try:
         markets = exchange.load_markets()
     except Exception as e:
-        print(f"Could not load OKX markets ({type(e).__name__}); using fallback list.")
+        print(f"Could not load markets ({type(e).__name__}); using fallback list.")
         return FALLBACK
 
     pairs = []
@@ -90,8 +92,4 @@ def get_universe(exchange, limit=100):
         if m and m.get("spot") and m.get("active", True):
             pairs.append(pair)
 
-    if not pairs:
-        return FALLBACK
-
-    _save_cache(pairs)
-    return pairs
+    return pairs or FALLBACK
