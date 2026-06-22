@@ -3,7 +3,7 @@ name: Crypto Agent Scan
 # Runs the bot on GitHub's free servers, no laptop needed.
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes (GitHub runs it best-effort)
+    - cron: "7 * * * *"     # once per hour (at :07); fits the free minutes on a private repo
   workflow_dispatch: {}       # also lets you run it manually from the website
 
 jobs:
