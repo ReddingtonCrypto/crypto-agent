@@ -1,0 +1,40 @@
+name: Crypto Agent Scan
+
+# Runs the bot on GitHub's free servers, no laptop needed.
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes (GitHub runs it best-effort)
+  workflow_dispatch: {}       # also lets you run it manually from the website
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install libraries
+        run: pip install -r requirements.txt
+
+      # Remember past signals between runs so the same coin isn't re-alerted.
+      - name: Restore signal history
+        uses: actions/cache@v4
+        with:
+          path: database/crypto.db
+          key: crypto-db-${{ github.run_id }}
+          restore-keys: crypto-db-
+
+      - name: Create database if missing
+        run: python database_manager.py
+
+      - name: Run one scan
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scan_once.py
