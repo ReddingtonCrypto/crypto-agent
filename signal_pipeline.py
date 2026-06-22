@@ -66,28 +66,28 @@ async def send_alert(message):
     )
 
 
-def last_alert():
-    """Return (coin, direction) of the most recent Telegram alert, or None."""
+def _last_signature():
+    """The 'signature' string of the most recent alert (we store the top-3
+    set in the coin column). Returns None if we've never alerted."""
     conn = sqlite3.connect("database/crypto.db")
     row = conn.execute(
-        "SELECT coin, direction FROM alerts ORDER BY id DESC LIMIT 1"
+        "SELECT coin FROM alerts ORDER BY id DESC LIMIT 1"
     ).fetchone()
     conn.close()
-    return row
+    return row[0] if row else None
 
 
-def is_new_alert(coin, direction):
-    """True if this differs from the last alert we sent (so we don't ping the
-    same setup over and over). Everything is still logged regardless."""
-    last = last_alert()
-    return last is None or last[0] != coin or last[1] != direction
+def is_new_alert(signature):
+    """True when the top-3 set has changed since the last ping (so we alert on
+    anything new without spamming the same set every scan)."""
+    return _last_signature() != signature
 
 
-def record_alert(coin, direction, score):
+def record_alert(signature):
     conn = sqlite3.connect("database/crypto.db")
     conn.execute(
-        "INSERT INTO alerts (coin, direction, score) VALUES (?,?,?)",
-        (coin, direction, score),
+        "INSERT INTO alerts (coin, direction, score) VALUES (?, '', 0)",
+        (signature,),
     )
     conn.commit()
     conn.close()

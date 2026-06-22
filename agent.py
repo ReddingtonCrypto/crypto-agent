@@ -7,6 +7,7 @@ import pandas as pd
 
 import universe
 import paper_trading
+from formatting import fmt_price
 from risk_engine import calculate_trade
 from signal_pipeline import save_signal, send_alert, is_new_alert, record_alert
 from confidence_engine import calculate_confidence
@@ -178,25 +179,28 @@ Price: {best['price']}
 """
     )
 
-    # 5) Ping Telegram with the TOP 3 signals, but only when the #1 changes
-    #    (so you see more opportunities without repeat spam).
-    if is_new_alert(best["coin"], best["direction"]):
+    # 5) Ping Telegram with the TOP 3 signals, but only when the top-3 SET
+    #    changes (so you see anything new without repeat spam).
+    top3 = qualified[:3]
+    signature = "|".join(sorted(f"{s['coin']}:{s['direction']}" for s in top3))
+
+    if is_new_alert(signature):
         lines = ["CRYPTO AGENT - TOP SIGNALS\n"]
-        for i, s in enumerate(qualified[:3], 1):
+        for i, s in enumerate(top3, 1):
             tr = calculate_trade(s["price"], s["direction"], s["atr"])
             lines.append(
                 f"{i}) {s['coin']}  {s['direction']}  {s['confidence']}%\n"
-                f"   Entry {tr['entry']}\n"
-                f"   Stop  {tr['stop']}\n"
-                f"   TP1   {tr['tp1']}   TP2 {tr['tp2']}\n"
+                f"   Entry {fmt_price(tr['entry'])}\n"
+                f"   Stop  {fmt_price(tr['stop'])}\n"
+                f"   TP1   {fmt_price(tr['tp1'])}   TP2 {fmt_price(tr['tp2'])}\n"
             )
         message = "\n".join(lines)
 
         asyncio.run(send_alert(message))
-        record_alert(best["coin"], best["direction"], best["confidence"])
+        record_alert(signature)
         print(message)
     else:
-        print("Top signal unchanged since last alert - logged, no repeat ping")
+        print("Top-3 unchanged since last alert - logged, no repeat ping")
 
 
 # Loop forever only when run directly (python agent.py) on your own machine.

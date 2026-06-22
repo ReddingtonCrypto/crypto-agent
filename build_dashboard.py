@@ -8,6 +8,8 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 
+from formatting import fmt_price
+
 
 DB = "database/crypto.db"
 OUT_DIR = "site"
@@ -79,8 +81,9 @@ def build():
     if open_t:
         open_rows = "".join(
             f"<tr><td>{r['coin']}</td><td>{_dir_span(r['direction'])}</td>"
-            f"<td>{r['score']}%</td><td>{r['entry']}</td><td>{r['stop']}</td>"
-            f"<td>{r['tp1']}</td><td>{r['opened_at']}</td></tr>"
+            f"<td>{r['score']}%</td><td>{fmt_price(r['entry'])}</td>"
+            f"<td>{fmt_price(r['stop'])}</td>"
+            f"<td>{fmt_price(r['tp1'])}</td><td>{r['opened_at']}</td></tr>"
             for r in open_t
         )
         open_table = (
