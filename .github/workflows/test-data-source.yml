@@ -1,0 +1,25 @@
+name: Test Data Sources
+
+# Manual only. Checks which exchanges serve data from GitHub's servers.
+# Does not affect the live scanning bot.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install ccxt
+        run: pip install ccxt
+
+      - name: Test exchanges
+        run: python test_exchange.py
