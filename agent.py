@@ -53,19 +53,8 @@ def fetch_candles(coin, timeframe, retries=3):
             time.sleep(3)
 
 
-def analyze_tf(coin, timeframe, horizon):
-    """Fetch one coin/timeframe and analyse the last CLOSED candle.
-
-    Returns a dict with trend_dir + price (for multi-timeframe confirmation)
-    and a `signals` list that may contain a regime signal (Trend or Range)
-    and/or an ICT signal. Returns None only if there isn't enough data."""
-    candles = fetch_candles(coin, timeframe)
-
-    df = pd.DataFrame(
-        candles,
-        columns=["timestamp", "open", "high", "low", "close", "volume"],
-    )
-
+def add_indicators(df):
+    """Add EMA/RSI/ATR/volume columns to a candle DataFrame (in place)."""
     df["EMA20"] = df.close.ewm(span=20).mean()
     df["EMA50"] = df.close.ewm(span=50).mean()
 
@@ -79,11 +68,30 @@ def analyze_tf(coin, timeframe, horizon):
 
     df["ATR"] = (df.high - df.low).rolling(14).mean()
     df["VOL_SMA"] = df.volume.rolling(20).mean()
+    return df
+
+
+def analyze_tf(coin, timeframe, horizon):
+    """Fetch one coin/timeframe and analyse the last CLOSED candle."""
+    candles = fetch_candles(coin, timeframe)
+
+    df = pd.DataFrame(
+        candles,
+        columns=["timestamp", "open", "high", "low", "close", "volume"],
+    )
+    add_indicators(df)
 
     # Decide on the last CLOSED candle (drop the still-forming one) -> no repaint.
     closed = df.iloc[:-1]
     if len(closed) < 55:
         return None
+    return evaluate(closed, coin, timeframe, horizon)
+
+
+def evaluate(closed, coin, timeframe, horizon):
+    """Run all strategies on a closed-candle DataFrame (must already have
+    indicator columns). Returns trend_dir + price + a `signals` list. Shared
+    by the live bot and the backtester."""
     latest = closed.iloc[-1]
 
     trend_dir = "LONG" if latest.EMA20 > latest.EMA50 else "SHORT"
@@ -203,6 +211,11 @@ def passes_filters(s):
     if s["strategy"] == "Range":
         # Range signals are only valid in an actual range.
         return s["regime"] == "RANGE"
+
+    if s["strategy"] == "ICT":
+        # The sweep -> MSS -> FVG sequence is the entry logic; the common
+        # checks above (confidence/quality/volume) are enough.
+        return True
 
     return False
 

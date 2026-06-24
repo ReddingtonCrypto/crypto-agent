@@ -26,19 +26,17 @@ def find_swings(df, lookback=2):
     highs = []
     lows = []
 
-    for i in range(lookback, len(df) - lookback):
+    # Use numpy arrays (not pandas .iloc) so this is fast enough to call
+    # thousands of times during a backtest.
+    h = df["high"].to_numpy()
+    l = df["low"].to_numpy()
+    n = len(h)
 
-        window_high = df["high"].iloc[i - lookback:i + lookback + 1]
-        window_low = df["low"].iloc[i - lookback:i + lookback + 1]
-
-        center_high = df["high"].iloc[i]
-        center_low = df["low"].iloc[i]
-
-        if center_high == window_high.max():
-            highs.append((i, float(center_high)))
-
-        if center_low == window_low.min():
-            lows.append((i, float(center_low)))
+    for i in range(lookback, n - lookback):
+        if h[i] == h[i - lookback:i + lookback + 1].max():
+            highs.append((i, float(h[i])))
+        if l[i] == l[i - lookback:i + lookback + 1].min():
+            lows.append((i, float(l[i])))
 
     return highs, lows
 
