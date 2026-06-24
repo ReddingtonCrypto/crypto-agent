@@ -14,6 +14,7 @@ from confidence_engine import calculate_confidence
 from regime_engine import get_regime
 from market_filter import market_quality
 from strategies.smc.market_structure import detect_structure
+from strategies.smc.smc_features import analyze as smc_analyze
 
 exchange = ccxt.binanceus({
     "enableRateLimit": True,   # space out requests so the exchange doesn't temp-ban us
@@ -118,6 +119,19 @@ def scan_one(coin, timeframe, horizon):
             elif smc["event"] == "CHoCH" and not aligned:
                 confidence = max(0, confidence - 10)
 
+    # ----- SMC features: FVG, order/breaker/mitigation blocks, sweeps,
+    #       equal highs/lows, stop hunts, session sweeps, MSS -----
+    feats = smc_analyze(df)
+    smc_features = feats["tags"]
+    if feats["bias"] == "BULLISH" and direction == "LONG":
+        confidence = min(100, confidence + min(10, feats["bull"] * 2))
+    elif feats["bias"] == "BEARISH" and direction == "SHORT":
+        confidence = min(100, confidence + min(10, feats["bear"] * 2))
+    elif feats["bias"] == "BULLISH" and direction == "SHORT":
+        confidence = max(0, confidence - 5)
+    elif feats["bias"] == "BEARISH" and direction == "LONG":
+        confidence = max(0, confidence - 5)
+
     return {
         "coin": coin,
         "strategy": strategy,
@@ -129,6 +143,7 @@ def scan_one(coin, timeframe, horizon):
         "quality": quality,
         "atr": float(latest.ATR),
         "smc": smc_tag,
+        "smc_features": smc_features,
         "vol_confirm": vol_confirm,
         "horizon": horizon,
         "timeframe": timeframe,
@@ -264,6 +279,7 @@ Quality: {best['quality']}
 RSI: {round(best['rsi'], 2)}
 Volume confirmed: {best['vol_confirm']}
 Structure: {best.get('smc', '-')}
+SMC: {', '.join(best.get('smc_features') or []) or '-'}
 Price: {best['price']}
 """
     )
@@ -280,13 +296,15 @@ Price: {best['price']}
         for i, s in enumerate(top3, 1):
             tr = calculate_trade(s["price"], s["direction"], s["atr"])
             smc_line = f"   Structure {s['smc']}\n" if s.get("smc", "-") != "-" else ""
+            feats = s.get("smc_features") or []
+            feat_line = f"   SMC: {', '.join(feats[:3])}\n" if feats else ""
             lines.append(
                 f"{i}) {s['coin']}  {s['direction']}  {s['confidence']}%\n"
                 f"   {s['horizon']} ({s['timeframe']}) - {s['strategy']}\n"
                 f"   Entry {fmt_price(tr['entry'])}\n"
                 f"   Stop  {fmt_price(tr['stop'])}\n"
                 f"   TP1   {fmt_price(tr['tp1'])}   TP2 {fmt_price(tr['tp2'])}\n"
-                f"{smc_line}"
+                f"{smc_line}{feat_line}"
             )
         message = "\n".join(lines)
 
