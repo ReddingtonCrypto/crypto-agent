@@ -27,8 +27,6 @@ TIMEFRAMES = [
     ("Day Trade", "15m"),
     ("Day Trade", "1h"),
     ("Swing", "4h"),
-    ("Long-term", "1d"),
-    ("Long-term", "1w"),
 ]
 
 
@@ -67,37 +65,62 @@ def scan_one(coin, timeframe, horizon):
 
     df["ATR"] = (df.high - df.low).rolling(14).mean()
 
+    # ----- Volume indicator: latest volume vs its 20-period average -----
+    df["VOL_SMA"] = df.volume.rolling(20).mean()
+
     latest = df.iloc[-1]
 
-    direction = "LONG" if latest.EMA20 > latest.EMA50 else "SHORT"
+    vol_sma = latest.VOL_SMA
+    vol_confirm = bool(pd.notna(vol_sma) and latest.volume > vol_sma)
 
-    confidence = calculate_confidence(
-        latest.EMA20, latest.EMA50, latest.close, latest.RSI
-    )
     regime = get_regime(latest.EMA20, latest.EMA50, latest.RSI)
     quality = market_quality(
         latest.volume, df.volume.mean(), latest.ATR, latest.close
     )
 
-    # ----- SMC: market structure (BOS / CHoCH) -----
+    # ----- Pick a strategy based on the regime -----
+    if regime in ("TREND_BULL", "TREND_BEAR"):
+        # TREND: ride the direction of the EMA stack.
+        strategy = "Trend"
+        direction = "LONG" if latest.EMA20 > latest.EMA50 else "SHORT"
+        confidence = calculate_confidence(
+            latest.EMA20, latest.EMA50, latest.close, latest.RSI
+        )
+    elif regime == "RANGE":
+        # RANGE: fade the extremes (buy oversold support, sell overbought).
+        strategy = "Range"
+        if latest.RSI < 35:
+            direction = "LONG"
+        elif latest.RSI > 65:
+            direction = "SHORT"
+        else:
+            return None  # sideways but no edge right now
+        confidence = range_confidence(latest.RSI)
+    else:
+        return None  # WEAK_TREND / unclear -> no signal
+
+    # Volume confirmation gives a small boost (and is required in passes_filters).
+    if vol_confirm:
+        confidence = min(100, confidence + 5)
+
+    # ----- SMC: market structure (BOS / CHoCH) — trend continuation only -----
     smc = detect_structure(df, lookback=2)
     smc_tag = "-"
     if smc["event"]:
         smc_tag = f"{smc['event']} {smc['direction']}"  # e.g. "BOS BULLISH"
-
-        aligned = (
-            (direction == "LONG" and smc["direction"] == "BULLISH")
-            or (direction == "SHORT" and smc["direction"] == "BEARISH")
-        )
-        if smc["event"] == "BOS" and aligned:
-            # Structure confirms the trade direction (continuation) -> stronger.
-            confidence = min(100, confidence + 10)
-        elif smc["event"] == "CHoCH" and not aligned:
-            # Structure flipping against the trade -> caution, trim confidence.
-            confidence = max(0, confidence - 10)
+        if strategy == "Trend":
+            aligned = (
+                (direction == "LONG" and smc["direction"] == "BULLISH")
+                or (direction == "SHORT" and smc["direction"] == "BEARISH")
+            )
+            if smc["event"] == "BOS" and aligned:
+                confidence = min(100, confidence + 10)
+            elif smc["event"] == "CHoCH" and not aligned:
+                confidence = max(0, confidence - 10)
 
     return {
         "coin": coin,
+        "strategy": strategy,
         "direction": direction,
         "confidence": confidence,
         "price": float(latest.close),
@@ -106,24 +129,48 @@ def scan_one(coin, timeframe, horizon):
         "quality": quality,
         "atr": float(latest.ATR),
         "smc": smc_tag,
+        "vol_confirm": vol_confirm,
         "horizon": horizon,
         "timeframe": timeframe,
     }
 
 
+def range_confidence(rsi):
+    """Confidence for a range (mean-reversion) signal: the more extreme the
+    RSI, the stronger the edge."""
+    c = 55
+    if rsi < 25 or rsi > 75:
+        c += 25
+    elif rsi < 30 or rsi > 70:
+        c += 15
+    elif rsi < 35 or rsi > 65:
+        c += 10
+    return c
+
+
 def passes_filters(s):
     """The rules that decide whether a coin is a tradeable signal."""
+    # Common requirements for both strategies.
     if s["confidence"] < 70:
         return False
     if s["quality"] != "STRONG":
         return False
-    if s["regime"] in ["RANGE", "WEAK_TREND"]:
+    if not s["vol_confirm"]:          # volume must confirm participation
         return False
-    if s["direction"] == "LONG" and s["rsi"] > 75:
-        return False
-    if s["direction"] == "SHORT" and s["rsi"] < 25:
-        return False
-    return True
+
+    if s["strategy"] == "Trend":
+        # Don't chase a trend that's already over-extended.
+        if s["direction"] == "LONG" and s["rsi"] > 75:
+            return False
+        if s["direction"] == "SHORT" and s["rsi"] < 25:
+            return False
+        return True
+
+    if s["strategy"] == "Range":
+        # Range signals are only valid in an actual range.
+        return s["regime"] == "RANGE"
+
+    return False
 
 
 def run_agent():
@@ -209,11 +256,13 @@ def run_agent():
         f"""===== BEST SIGNAL =====
 Coin: {best['coin']}
 Horizon: {best['horizon']} ({best['timeframe']})
+Strategy: {best['strategy']}
 Direction: {best['direction']}
 Confidence: {best['confidence']}%
 Regime: {best['regime']}
 Quality: {best['quality']}
 RSI: {round(best['rsi'], 2)}
+Volume confirmed: {best['vol_confirm']}
 Structure: {best.get('smc', '-')}
 Price: {best['price']}
 """
@@ -233,7 +282,7 @@ Price: {best['price']}
             smc_line = f"   Structure {s['smc']}\n" if s.get("smc", "-") != "-" else ""
             lines.append(
                 f"{i}) {s['coin']}  {s['direction']}  {s['confidence']}%\n"
-                f"   {s['horizon']} ({s['timeframe']})\n"
+                f"   {s['horizon']} ({s['timeframe']}) - {s['strategy']}\n"
                 f"   Entry {fmt_price(tr['entry'])}\n"
                 f"   Stop  {fmt_price(tr['stop'])}\n"
                 f"   TP1   {fmt_price(tr['tp1'])}   TP2 {fmt_price(tr['tp2'])}\n"
