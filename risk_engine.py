@@ -7,6 +7,8 @@ def calculate_trade(price, direction, atr, strategy="Trend"):
     """
     if strategy == "Range":
         s_mult, t1_mult, t2_mult = 1.5, 1.5, 3.0
+    elif strategy == "ICT":
+        s_mult, t1_mult, t2_mult = 1.5, 3.0, 5.0
     else:  # Trend
         s_mult, t1_mult, t2_mult = 2.0, 3.0, 6.0
 

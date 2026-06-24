@@ -15,6 +15,7 @@ from regime_engine import get_regime
 from market_filter import market_quality
 from strategies.smc.market_structure import detect_structure
 from strategies.smc.smc_features import analyze as smc_analyze
+from strategies.smc.ict_model import detect_ict
 
 exchange = ccxt.binanceus({
     "enableRateLimit": True,   # space out requests so the exchange doesn't temp-ban us
@@ -55,10 +56,9 @@ def fetch_candles(coin, timeframe, retries=3):
 def analyze_tf(coin, timeframe, horizon):
     """Fetch one coin/timeframe and analyse the last CLOSED candle.
 
-    Always returns a dict with at least trend_dir + price (used for multi-
-    timeframe confirmation). When a tradeable setup exists, has_signal=True
-    and the full signal fields are included. Returns None only if there is
-    not enough data."""
+    Returns a dict with trend_dir + price (for multi-timeframe confirmation)
+    and a `signals` list that may contain a regime signal (Trend or Range)
+    and/or an ICT signal. Returns None only if there isn't enough data."""
     candles = fetch_candles(coin, timeframe)
 
     df = pd.DataFrame(
@@ -94,7 +94,7 @@ def analyze_tf(coin, timeframe, horizon):
         "horizon": horizon,
         "trend_dir": trend_dir,
         "price": float(latest.close),
-        "has_signal": False,
+        "signals": [],
     }
 
     vol_sma = latest.VOL_SMA
@@ -104,68 +104,68 @@ def analyze_tf(coin, timeframe, horizon):
         latest.volume, closed.volume.mean(), latest.ATR, latest.close
     )
 
-    # ----- Pick a strategy based on the regime -----
-    if regime in ("TREND_BULL", "TREND_BEAR"):
-        strategy = "Trend"
-        direction = trend_dir
-        confidence = calculate_confidence(
-            latest.EMA20, latest.EMA50, latest.close, latest.RSI
-        )
-    elif regime == "RANGE":
-        strategy = "Range"
-        if latest.RSI < 35:
-            direction = "LONG"
-        elif latest.RSI > 65:
-            direction = "SHORT"
-        else:
-            return result  # sideways but no edge right now
-        confidence = range_confidence(latest.RSI)
-    else:
-        return result  # WEAK_TREND / unclear -> no signal (trend_dir still returned)
-
-    if vol_confirm:
-        confidence = min(100, confidence + 5)
-
-    # ----- SMC: market structure (BOS / CHoCH) — trend continuation only -----
+    # SMC context — computed once, reused by every signal on this timeframe.
     smc = detect_structure(closed, lookback=2)
-    smc_tag = "-"
-    if smc["event"]:
-        smc_tag = f"{smc['event']} {smc['direction']}"
-        if strategy == "Trend":
+    smc_tag = f"{smc['event']} {smc['direction']}" if smc["event"] else "-"
+    feats = smc_analyze(closed)
+
+    def make(strategy, direction, base_conf):
+        conf = base_conf
+        if vol_confirm:
+            conf = min(100, conf + 5)
+        # SMC structure: trend continuation/reversal nudge (trend strategy only).
+        if smc["event"] and strategy == "Trend":
             aligned = (
                 (direction == "LONG" and smc["direction"] == "BULLISH")
                 or (direction == "SHORT" and smc["direction"] == "BEARISH")
             )
             if smc["event"] == "BOS" and aligned:
-                confidence = min(100, confidence + 10)
+                conf = min(100, conf + 10)
             elif smc["event"] == "CHoCH" and not aligned:
-                confidence = max(0, confidence - 10)
+                conf = max(0, conf - 10)
+        # SMC features bias.
+        if feats["bias"] == "BULLISH" and direction == "LONG":
+            conf = min(100, conf + min(10, feats["bull"] * 2))
+        elif feats["bias"] == "BEARISH" and direction == "SHORT":
+            conf = min(100, conf + min(10, feats["bear"] * 2))
+        elif feats["bias"] == "BULLISH" and direction == "SHORT":
+            conf = max(0, conf - 5)
+        elif feats["bias"] == "BEARISH" and direction == "LONG":
+            conf = max(0, conf - 5)
+        return {
+            "coin": coin,
+            "timeframe": timeframe,
+            "horizon": horizon,
+            "strategy": strategy,
+            "direction": direction,
+            "confidence": conf,
+            "price": float(latest.close),
+            "rsi": float(latest.RSI),
+            "regime": regime,
+            "quality": quality,
+            "atr": float(latest.ATR),
+            "smc": smc_tag,
+            "smc_features": feats["tags"],
+            "vol_confirm": vol_confirm,
+        }
 
-    # ----- SMC features: FVG, order/breaker/mitigation blocks, sweeps, etc. -----
-    feats = smc_analyze(closed)
-    smc_features = feats["tags"]
-    if feats["bias"] == "BULLISH" and direction == "LONG":
-        confidence = min(100, confidence + min(10, feats["bull"] * 2))
-    elif feats["bias"] == "BEARISH" and direction == "SHORT":
-        confidence = min(100, confidence + min(10, feats["bear"] * 2))
-    elif feats["bias"] == "BULLISH" and direction == "SHORT":
-        confidence = max(0, confidence - 5)
-    elif feats["bias"] == "BEARISH" and direction == "LONG":
-        confidence = max(0, confidence - 5)
+    # ----- Regime-based strategy (Trend or Range) -----
+    if regime in ("TREND_BULL", "TREND_BEAR"):
+        result["signals"].append(make(
+            "Trend", trend_dir,
+            calculate_confidence(latest.EMA20, latest.EMA50, latest.close, latest.RSI),
+        ))
+    elif regime == "RANGE":
+        if latest.RSI < 35:
+            result["signals"].append(make("Range", "LONG", range_confidence(latest.RSI)))
+        elif latest.RSI > 65:
+            result["signals"].append(make("Range", "SHORT", range_confidence(latest.RSI)))
 
-    result.update({
-        "has_signal": True,
-        "strategy": strategy,
-        "direction": direction,
-        "confidence": confidence,
-        "rsi": float(latest.RSI),
-        "regime": regime,
-        "quality": quality,
-        "atr": float(latest.ATR),
-        "smc": smc_tag,
-        "smc_features": smc_features,
-        "vol_confirm": vol_confirm,
-    })
+    # ----- ICT model (independent of regime: sweep -> MSS -> FVG) -----
+    ict = detect_ict(closed)
+    if ict:
+        result["signals"].append(make("ICT", ict["direction"], 85))
+
     return result
 
 
@@ -238,15 +238,16 @@ def run_agent():
         # Now collect signals, applying multi-timeframe confirmation.
         for horizon, tf in TIMEFRAMES:
             r = per_tf.get(tf)
-            if not r or not r.get("has_signal"):
+            if not r:
                 continue
-            if r["strategy"] == "Trend":
-                ctf = CONFIRM_TF.get(tf)
-                cr = per_tf.get(ctf)
-                if cr is None or cr["trend_dir"] != r["direction"]:
-                    continue  # confirmation timeframe disagrees -> skip
-                r["confirm"] = f"{ctf} agrees"
-            signals.append(r)
+            for sig in r.get("signals", []):
+                if sig["strategy"] == "Trend":
+                    ctf = CONFIRM_TF.get(tf)
+                    cr = per_tf.get(ctf)
+                    if cr is None or cr["trend_dir"] != sig["direction"]:
+                        continue  # confirmation timeframe disagrees -> skip
+                    sig["confirm"] = f"{ctf} agrees"
+                signals.append(sig)
 
     if not price_map:
         print("No data collected")
@@ -278,13 +279,13 @@ def run_agent():
         opened = paper_trading.open_trade(
             s["coin"], s["direction"],
             trade["entry"], trade["stop"], trade["tp1"], trade["tp2"],
-            s["confidence"], s["timeframe"],
+            s["confidence"], s["timeframe"], s["strategy"],
         )
         if opened:
             save_signal(
                 s["coin"], s["direction"],
                 trade["entry"], trade["stop"], trade["tp1"], trade["tp2"],
-                s["confidence"], s["timeframe"],
+                s["confidence"], s["timeframe"], s["strategy"],
             )
 
     # 4) Show the running accuracy scoreboard.

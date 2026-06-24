@@ -14,7 +14,8 @@ def save_signal(
     tp1,
     tp2,
     score,
-    timeframe=None
+    timeframe=None,
+    strategy=None
 ):
 
     conn = sqlite3.connect(
@@ -35,9 +36,10 @@ def save_signal(
     tp1,
     tp2,
     score,
-    timeframe
+    timeframe,
+    strategy
     )
-    VALUES (?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?)
     """,
     (
         coin,
@@ -47,7 +49,8 @@ def save_signal(
         tp1,
         tp2,
         score,
-        timeframe
+        timeframe,
+        strategy
     ))
 
 
@@ -55,7 +58,7 @@ def save_signal(
     conn.close()
 
 
-    print("Signal saved:", coin, timeframe or "")
+    print("Signal saved:", coin, timeframe or "", strategy or "")
 
 
 

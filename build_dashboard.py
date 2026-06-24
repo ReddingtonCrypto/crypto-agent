@@ -60,6 +60,40 @@ def _rows(conn):
     return open_t, closed_t, wins, losses, avg
 
 
+def _by_strategy(conn):
+    """Per-strategy scoreboard rows: which strategy is actually winning."""
+    strategies = [
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT strategy FROM paper_trades WHERE strategy IS NOT NULL"
+        ).fetchall()
+    ]
+    rows = []
+    for strat in strategies:
+        wins = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE strategy=? AND status='WIN'", (strat,)
+        ).fetchone()[0]
+        losses = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE strategy=? AND status='LOSS'", (strat,)
+        ).fetchone()[0]
+        open_c = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE strategy=? AND status='OPEN'", (strat,)
+        ).fetchone()[0]
+        avg = conn.execute(
+            "SELECT AVG(pnl_pct) FROM paper_trades WHERE strategy=? AND status IN ('WIN','LOSS')",
+            (strat,),
+        ).fetchone()[0]
+        done = wins + losses
+        rows.append({
+            "strategy": strat,
+            "open": open_c,
+            "closed": done,
+            "win_rate": round(wins / done * 100, 1) if done else 0.0,
+            "avg_pnl": round(avg, 2) if avg is not None else 0.0,
+        })
+    rows.sort(key=lambda x: x["avg_pnl"], reverse=True)
+    return rows
+
+
 def _dir_span(d):
     cls = "long" if d == "LONG" else "short"
     return f'<span class="{cls}">{d}</span>'
@@ -70,6 +104,7 @@ def build():
 
     conn = sqlite3.connect(DB)
     open_t, closed_t, wins, losses, avg = _rows(conn)
+    strat_rows = _by_strategy(conn)
     conn.close()
 
     closed = wins + losses
@@ -77,10 +112,26 @@ def build():
     avg = round(avg, 2) if avg is not None else 0.0
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+    # Per-strategy scoreboard (which strategy is winning)
+    if strat_rows:
+        srows = "".join(
+            f"<tr><td>{r['strategy']}</td><td>{r['open']}</td><td>{r['closed']}</td>"
+            f"<td>{r['win_rate']}%</td>"
+            f"<td class=\"{'win' if r['avg_pnl'] >= 0 else 'loss'}\">{r['avg_pnl']}%</td></tr>"
+            for r in strat_rows
+        )
+        strat_table = (
+            "<table><tr><th>Strategy</th><th>Open</th><th>Closed</th>"
+            "<th>Win rate</th><th>Avg P&L</th></tr>"
+            f"{srows}</table>"
+        )
+    else:
+        strat_table = '<div class="empty">No strategy results yet.</div>'
+
     # Open-trades table
     if open_t:
         open_rows = "".join(
-            f"<tr><td>{r['coin']}</td><td>{r['timeframe'] or '-'}</td>"
+            f"<tr><td>{r['coin']}</td><td>{r['strategy'] or '-'}</td><td>{r['timeframe'] or '-'}</td>"
             f"<td>{_dir_span(r['direction'])}</td>"
             f"<td>{r['score']}%</td><td>{fmt_price(r['entry'])}</td>"
             f"<td>{fmt_price(r['stop'])}</td>"
@@ -88,7 +139,7 @@ def build():
             for r in open_t
         )
         open_table = (
-            "<table><tr><th>Coin</th><th>TF</th><th>Dir</th><th>Conf</th><th>Entry</th>"
+            "<table><tr><th>Coin</th><th>Strat</th><th>TF</th><th>Dir</th><th>Conf</th><th>Entry</th>"
             "<th>Stop</th><th>TP1</th><th>Opened (UTC)</th></tr>"
             f"{open_rows}</table>"
         )
@@ -101,14 +152,14 @@ def build():
         for r in closed_t:
             cls = "win" if r["status"] == "WIN" else "loss"
             closed_rows += (
-                f"<tr><td>{r['coin']}</td><td>{r['timeframe'] or '-'}</td>"
+                f"<tr><td>{r['coin']}</td><td>{r['strategy'] or '-'}</td><td>{r['timeframe'] or '-'}</td>"
                 f"<td>{_dir_span(r['direction'])}</td>"
                 f'<td class="{cls}">{r["status"]}</td>'
                 f'<td class="{cls}">{r["pnl_pct"]}%</td>'
                 f"<td>{r['closed_at']}</td></tr>"
             )
         closed_table = (
-            "<table><tr><th>Coin</th><th>TF</th><th>Dir</th><th>Result</th>"
+            "<table><tr><th>Coin</th><th>Strat</th><th>TF</th><th>Dir</th><th>Result</th>"
             "<th>P&L</th><th>Closed (UTC)</th></tr>"
             f"{closed_rows}</table>"
         )
@@ -130,6 +181,8 @@ def build():
         f"<div class='card'><div class='label'>Losses</div><div class='value'>{losses}</div></div>"
         f"<div class='card'><div class='label'>Avg P&L</div><div class='value'>{avg}%</div></div>"
         "</div>"
+        "<h2>Strategy scoreboard</h2>"
+        f"{strat_table}"
         "<h2>Open trades</h2>"
         f"{open_table}"
         "<h2>Recent results</h2>"

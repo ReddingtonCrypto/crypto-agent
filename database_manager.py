@@ -25,6 +25,7 @@ tp1 REAL,
 tp2 REAL,
 score INTEGER,
 timeframe TEXT,
+strategy TEXT,
 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
@@ -43,6 +44,7 @@ tp1 REAL,
 tp2 REAL,
 score INTEGER,
 timeframe TEXT,
+strategy TEXT,
 status TEXT DEFAULT 'OPEN',
 opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 closed_at TIMESTAMP,
@@ -52,12 +54,13 @@ pnl_pct REAL
 """)
 
 
-# Migration: add the timeframe column to databases created before multi-timeframe.
+# Migration: add columns to databases created before these features existed.
 for table in ("signals", "paper_trades"):
-    try:
-        cursor.execute(f"ALTER TABLE {table} ADD COLUMN timeframe TEXT")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    for col in ("timeframe", "strategy"):
+        try:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 # Record of what was actually pinged to Telegram (for alert-on-change).
