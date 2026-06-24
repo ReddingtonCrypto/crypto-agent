@@ -13,6 +13,7 @@ from signal_pipeline import save_signal, send_alert, is_new_alert, record_alert
 from confidence_engine import calculate_confidence
 from regime_engine import get_regime
 from market_filter import market_quality
+from strategies.smc.market_structure import detect_structure
 
 exchange = ccxt.binanceus({
     "enableRateLimit": True,   # space out requests so the exchange doesn't temp-ban us
@@ -67,6 +68,23 @@ def scan_one(coin):
         latest.volume, df.volume.mean(), latest.ATR, latest.close
     )
 
+    # ----- SMC: market structure (BOS / CHoCH) -----
+    smc = detect_structure(df, lookback=2)
+    smc_tag = "-"
+    if smc["event"]:
+        smc_tag = f"{smc['event']} {smc['direction']}"  # e.g. "BOS BULLISH"
+
+        aligned = (
+            (direction == "LONG" and smc["direction"] == "BULLISH")
+            or (direction == "SHORT" and smc["direction"] == "BEARISH")
+        )
+        if smc["event"] == "BOS" and aligned:
+            # Structure confirms the trade direction (continuation) -> stronger.
+            confidence = min(100, confidence + 10)
+        elif smc["event"] == "CHoCH" and not aligned:
+            # Structure flipping against the trade -> caution, trim confidence.
+            confidence = max(0, confidence - 10)
+
     return {
         "coin": coin,
         "direction": direction,
@@ -76,6 +94,7 @@ def scan_one(coin):
         "regime": regime,
         "quality": quality,
         "atr": float(latest.ATR),
+        "smc": smc_tag,
     }
 
 
@@ -175,6 +194,7 @@ Confidence: {best['confidence']}%
 Regime: {best['regime']}
 Quality: {best['quality']}
 RSI: {round(best['rsi'], 2)}
+Structure: {best.get('smc', '-')}
 Price: {best['price']}
 """
     )
@@ -188,11 +208,13 @@ Price: {best['price']}
         lines = ["CRYPTO AGENT - TOP SIGNALS\n"]
         for i, s in enumerate(top3, 1):
             tr = calculate_trade(s["price"], s["direction"], s["atr"])
+            smc_line = f"   Structure {s['smc']}\n" if s.get("smc", "-") != "-" else ""
             lines.append(
                 f"{i}) {s['coin']}  {s['direction']}  {s['confidence']}%\n"
                 f"   Entry {fmt_price(tr['entry'])}\n"
                 f"   Stop  {fmt_price(tr['stop'])}\n"
                 f"   TP1   {fmt_price(tr['tp1'])}   TP2 {fmt_price(tr['tp2'])}\n"
+                f"{smc_line}"
             )
         message = "\n".join(lines)
 
