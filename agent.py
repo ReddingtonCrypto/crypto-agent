@@ -21,22 +21,33 @@ exchange = ccxt.binanceus({
 })
 
 
-def fetch_candles(coin, retries=3):
-    """Fetch 1h candles with a few retries, so a single hiccup doesn't
-    skip the coin for the whole scan."""
+# Trade horizons -> the candle timeframe(s) each one scans.
+# Day Trade = minutes/hours, Swing = a few days, Long-term = weeks/months.
+TIMEFRAMES = [
+    ("Day Trade", "15m"),
+    ("Day Trade", "1h"),
+    ("Swing", "4h"),
+    ("Long-term", "1d"),
+    ("Long-term", "1w"),
+]
+
+
+def fetch_candles(coin, timeframe, retries=3):
+    """Fetch candles for one timeframe with a few retries, so a single
+    hiccup doesn't skip the coin for the whole scan."""
     for attempt in range(retries):
         try:
-            return exchange.fetch_ohlcv(coin, timeframe="1h", limit=200)
+            return exchange.fetch_ohlcv(coin, timeframe=timeframe, limit=200)
         except Exception:
             if attempt == retries - 1:
                 raise
             time.sleep(3)
 
 
-def scan_one(coin):
-    """Fetch one coin, compute indicators, and return its signal dict
-    (or None if there isn't enough data)."""
-    candles = fetch_candles(coin)
+def scan_one(coin, timeframe, horizon):
+    """Fetch one coin on one timeframe, compute indicators, and return its
+    signal dict (or None if there isn't enough data)."""
+    candles = fetch_candles(coin, timeframe)
 
     df = pd.DataFrame(
         candles,
@@ -95,6 +106,8 @@ def scan_one(coin):
         "quality": quality,
         "atr": float(latest.ATR),
         "smc": smc_tag,
+        "horizon": horizon,
+        "timeframe": timeframe,
     }
 
 
@@ -121,16 +134,20 @@ def run_agent():
     print("==============================\n")
 
     coins = universe.get_universe(exchange, limit=100)
-    print(f"Watching {len(coins)} coins (top by market cap, tradeable on {exchange.id})\n")
+    print(
+        f"Watching {len(coins)} coins across {len(TIMEFRAMES)} timeframes "
+        f"(tradeable on {exchange.id})\n"
+    )
 
     signals = []
     for coin in coins:
-        try:
-            s = scan_one(coin)
-            if s is not None:
-                signals.append(s)
-        except Exception as e:
-            print(f"Error scanning {coin}: {type(e).__name__}: {e}")
+        for horizon, tf in TIMEFRAMES:
+            try:
+                s = scan_one(coin, tf, horizon)
+                if s is not None:
+                    signals.append(s)
+            except Exception as e:
+                print(f"Error scanning {coin} {tf}: {type(e).__name__}: {e}")
 
     if not signals:
         print("No signals collected")
@@ -142,9 +159,10 @@ def run_agent():
     for t in closed:
         mark = "WIN" if t["result"] == "WIN" else "LOSS"
         emoji = "✅" if t["result"] == "WIN" else "❌"
-        print(f"Trade closed: {t['coin']} {t['direction']} {mark} {t['pnl_pct']}%")
+        tf = t.get("timeframe", "")
+        print(f"Trade closed: {t['coin']} {t['direction']} {tf} {mark} {t['pnl_pct']}%")
         asyncio.run(send_alert(
-            f"{emoji} {mark}  {t['coin']}  {t['direction']}\n"
+            f"{emoji} {mark}  {t['coin']}  {t['direction']}  ({tf})\n"
             f"Result: {t['pnl_pct']}%"
         ))
 
@@ -155,19 +173,20 @@ def run_agent():
         reverse=True,
     )
 
-    # 3) Log each new setup and open a paper trade for it (one per coin+side).
+    # 3) Log each new setup and open a paper trade for it
+    #    (one per coin + side + timeframe).
     for s in qualified:
         trade = calculate_trade(s["price"], s["direction"], s["atr"])
         opened = paper_trading.open_trade(
             s["coin"], s["direction"],
             trade["entry"], trade["stop"], trade["tp1"], trade["tp2"],
-            s["confidence"],
+            s["confidence"], s["timeframe"],
         )
         if opened:
             save_signal(
                 s["coin"], s["direction"],
                 trade["entry"], trade["stop"], trade["tp1"], trade["tp2"],
-                s["confidence"],
+                s["confidence"], s["timeframe"],
             )
 
     # 4) Show the running accuracy scoreboard.
@@ -189,6 +208,7 @@ def run_agent():
     print(
         f"""===== BEST SIGNAL =====
 Coin: {best['coin']}
+Horizon: {best['horizon']} ({best['timeframe']})
 Direction: {best['direction']}
 Confidence: {best['confidence']}%
 Regime: {best['regime']}
@@ -202,7 +222,9 @@ Price: {best['price']}
     # 5) Ping Telegram with the TOP 3 signals, but only when the top-3 SET
     #    changes (so you see anything new without repeat spam).
     top3 = qualified[:3]
-    signature = "|".join(sorted(f"{s['coin']}:{s['direction']}" for s in top3))
+    signature = "|".join(
+        sorted(f"{s['coin']}:{s['direction']}:{s['timeframe']}" for s in top3)
+    )
 
     if is_new_alert(signature):
         lines = ["CRYPTO AGENT - TOP SIGNALS\n"]
@@ -211,6 +233,7 @@ Price: {best['price']}
             smc_line = f"   Structure {s['smc']}\n" if s.get("smc", "-") != "-" else ""
             lines.append(
                 f"{i}) {s['coin']}  {s['direction']}  {s['confidence']}%\n"
+                f"   {s['horizon']} ({s['timeframe']})\n"
                 f"   Entry {fmt_price(tr['entry'])}\n"
                 f"   Stop  {fmt_price(tr['stop'])}\n"
                 f"   TP1   {fmt_price(tr['tp1'])}   TP2 {fmt_price(tr['tp2'])}\n"

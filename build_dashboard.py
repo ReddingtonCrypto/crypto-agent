@@ -80,14 +80,15 @@ def build():
     # Open-trades table
     if open_t:
         open_rows = "".join(
-            f"<tr><td>{r['coin']}</td><td>{_dir_span(r['direction'])}</td>"
+            f"<tr><td>{r['coin']}</td><td>{r['timeframe'] or '-'}</td>"
+            f"<td>{_dir_span(r['direction'])}</td>"
             f"<td>{r['score']}%</td><td>{fmt_price(r['entry'])}</td>"
             f"<td>{fmt_price(r['stop'])}</td>"
             f"<td>{fmt_price(r['tp1'])}</td><td>{r['opened_at']}</td></tr>"
             for r in open_t
         )
         open_table = (
-            "<table><tr><th>Coin</th><th>Dir</th><th>Conf</th><th>Entry</th>"
+            "<table><tr><th>Coin</th><th>TF</th><th>Dir</th><th>Conf</th><th>Entry</th>"
             "<th>Stop</th><th>TP1</th><th>Opened (UTC)</th></tr>"
             f"{open_rows}</table>"
         )
@@ -100,13 +101,14 @@ def build():
         for r in closed_t:
             cls = "win" if r["status"] == "WIN" else "loss"
             closed_rows += (
-                f"<tr><td>{r['coin']}</td><td>{_dir_span(r['direction'])}</td>"
+                f"<tr><td>{r['coin']}</td><td>{r['timeframe'] or '-'}</td>"
+                f"<td>{_dir_span(r['direction'])}</td>"
                 f'<td class="{cls}">{r["status"]}</td>'
                 f'<td class="{cls}">{r["pnl_pct"]}%</td>'
                 f"<td>{r['closed_at']}</td></tr>"
             )
         closed_table = (
-            "<table><tr><th>Coin</th><th>Dir</th><th>Result</th>"
+            "<table><tr><th>Coin</th><th>TF</th><th>Dir</th><th>Result</th>"
             "<th>P&L</th><th>Closed (UTC)</th></tr>"
             f"{closed_rows}</table>"
         )

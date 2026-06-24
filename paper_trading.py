@@ -18,30 +18,31 @@ def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def has_open_trade(coin, direction):
+def has_open_trade(coin, direction, timeframe):
     conn = _conn()
     row = conn.execute(
-        "SELECT 1 FROM paper_trades WHERE coin=? AND direction=? AND status='OPEN' LIMIT 1",
-        (coin, direction),
+        "SELECT 1 FROM paper_trades WHERE coin=? AND direction=? AND timeframe=? "
+        "AND status='OPEN' LIMIT 1",
+        (coin, direction, timeframe),
     ).fetchone()
     conn.close()
     return row is not None
 
 
-def open_trade(coin, direction, entry, stop, tp1, tp2, score):
-    """Open a paper trade, unless one for this coin+direction is already open.
-    Returns True if a new trade was opened."""
-    if has_open_trade(coin, direction):
+def open_trade(coin, direction, entry, stop, tp1, tp2, score, timeframe):
+    """Open a paper trade, unless one for this coin+direction+timeframe is
+    already open. Returns True if a new trade was opened."""
+    if has_open_trade(coin, direction, timeframe):
         return False
 
     conn = _conn()
     conn.execute(
         """
         INSERT INTO paper_trades
-        (coin, direction, entry, stop, tp1, tp2, score, status, opened_at)
-        VALUES (?,?,?,?,?,?,?, 'OPEN', ?)
+        (coin, direction, entry, stop, tp1, tp2, score, timeframe, status, opened_at)
+        VALUES (?,?,?,?,?,?,?,?, 'OPEN', ?)
         """,
-        (coin, direction, entry, stop, tp1, tp2, score, _now()),
+        (coin, direction, entry, stop, tp1, tp2, score, timeframe, _now()),
     )
     conn.commit()
     conn.close()
@@ -53,11 +54,12 @@ def update_open_trades(price_map):
     reached TP1, or LOSS if it hit the stop. `price_map` is {coin: price}."""
     conn = _conn()
     rows = conn.execute(
-        "SELECT id, coin, direction, entry, stop, tp1 FROM paper_trades WHERE status='OPEN'"
+        "SELECT id, coin, direction, entry, stop, tp1, timeframe "
+        "FROM paper_trades WHERE status='OPEN'"
     ).fetchall()
 
     closed = []
-    for tid, coin, direction, entry, stop, tp1 in rows:
+    for tid, coin, direction, entry, stop, tp1, timeframe in rows:
         price = price_map.get(coin)
         if price is None or not entry:  # skip missing price or bad (zero) entry
             continue
@@ -90,6 +92,7 @@ def update_open_trades(price_map):
                 "direction": direction,
                 "result": outcome,
                 "pnl_pct": pnl,
+                "timeframe": timeframe,
             })
 
     conn.commit()
