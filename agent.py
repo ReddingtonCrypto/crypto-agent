@@ -30,6 +30,15 @@ TIMEFRAMES = [
     ("Swing", "4h"),
 ]
 
+# Which timeframe must AGREE on direction before a Trend signal is allowed.
+# Day Trade confirms UP the ladder (don't fight the bigger trend);
+# Swing confirms DOWN the ladder (a reversal shows on the lower TF first).
+CONFIRM_TF = {
+    "15m": "1h",
+    "1h": "4h",
+    "4h": "1h",
+}
+
 
 def fetch_candles(coin, timeframe, retries=3):
     """Fetch candles for one timeframe with a few retries, so a single
@@ -43,9 +52,13 @@ def fetch_candles(coin, timeframe, retries=3):
             time.sleep(3)
 
 
-def scan_one(coin, timeframe, horizon):
-    """Fetch one coin on one timeframe, compute indicators, and return its
-    signal dict (or None if there isn't enough data)."""
+def analyze_tf(coin, timeframe, horizon):
+    """Fetch one coin/timeframe and analyse the last CLOSED candle.
+
+    Always returns a dict with at least trend_dir + price (used for multi-
+    timeframe confirmation). When a tradeable setup exists, has_signal=True
+    and the full signal fields are included. Returns None only if there is
+    not enough data."""
     candles = fetch_candles(coin, timeframe)
 
     df = pd.DataFrame(
@@ -65,50 +78,59 @@ def scan_one(coin, timeframe, horizon):
     df["RSI"] = 100 - (100 / (1 + rs))
 
     df["ATR"] = (df.high - df.low).rolling(14).mean()
-
-    # ----- Volume indicator: latest volume vs its 20-period average -----
     df["VOL_SMA"] = df.volume.rolling(20).mean()
 
-    latest = df.iloc[-1]
+    # Decide on the last CLOSED candle (drop the still-forming one) -> no repaint.
+    closed = df.iloc[:-1]
+    if len(closed) < 55:
+        return None
+    latest = closed.iloc[-1]
+
+    trend_dir = "LONG" if latest.EMA20 > latest.EMA50 else "SHORT"
+
+    result = {
+        "coin": coin,
+        "timeframe": timeframe,
+        "horizon": horizon,
+        "trend_dir": trend_dir,
+        "price": float(latest.close),
+        "has_signal": False,
+    }
 
     vol_sma = latest.VOL_SMA
     vol_confirm = bool(pd.notna(vol_sma) and latest.volume > vol_sma)
-
     regime = get_regime(latest.EMA20, latest.EMA50, latest.RSI)
     quality = market_quality(
-        latest.volume, df.volume.mean(), latest.ATR, latest.close
+        latest.volume, closed.volume.mean(), latest.ATR, latest.close
     )
 
     # ----- Pick a strategy based on the regime -----
     if regime in ("TREND_BULL", "TREND_BEAR"):
-        # TREND: ride the direction of the EMA stack.
         strategy = "Trend"
-        direction = "LONG" if latest.EMA20 > latest.EMA50 else "SHORT"
+        direction = trend_dir
         confidence = calculate_confidence(
             latest.EMA20, latest.EMA50, latest.close, latest.RSI
         )
     elif regime == "RANGE":
-        # RANGE: fade the extremes (buy oversold support, sell overbought).
         strategy = "Range"
         if latest.RSI < 35:
             direction = "LONG"
         elif latest.RSI > 65:
             direction = "SHORT"
         else:
-            return None  # sideways but no edge right now
+            return result  # sideways but no edge right now
         confidence = range_confidence(latest.RSI)
     else:
-        return None  # WEAK_TREND / unclear -> no signal
+        return result  # WEAK_TREND / unclear -> no signal (trend_dir still returned)
 
-    # Volume confirmation gives a small boost (and is required in passes_filters).
     if vol_confirm:
         confidence = min(100, confidence + 5)
 
     # ----- SMC: market structure (BOS / CHoCH) — trend continuation only -----
-    smc = detect_structure(df, lookback=2)
+    smc = detect_structure(closed, lookback=2)
     smc_tag = "-"
     if smc["event"]:
-        smc_tag = f"{smc['event']} {smc['direction']}"  # e.g. "BOS BULLISH"
+        smc_tag = f"{smc['event']} {smc['direction']}"
         if strategy == "Trend":
             aligned = (
                 (direction == "LONG" and smc["direction"] == "BULLISH")
@@ -119,9 +141,8 @@ def scan_one(coin, timeframe, horizon):
             elif smc["event"] == "CHoCH" and not aligned:
                 confidence = max(0, confidence - 10)
 
-    # ----- SMC features: FVG, order/breaker/mitigation blocks, sweeps,
-    #       equal highs/lows, stop hunts, session sweeps, MSS -----
-    feats = smc_analyze(df)
+    # ----- SMC features: FVG, order/breaker/mitigation blocks, sweeps, etc. -----
+    feats = smc_analyze(closed)
     smc_features = feats["tags"]
     if feats["bias"] == "BULLISH" and direction == "LONG":
         confidence = min(100, confidence + min(10, feats["bull"] * 2))
@@ -132,12 +153,11 @@ def scan_one(coin, timeframe, horizon):
     elif feats["bias"] == "BEARISH" and direction == "LONG":
         confidence = max(0, confidence - 5)
 
-    return {
-        "coin": coin,
+    result.update({
+        "has_signal": True,
         "strategy": strategy,
         "direction": direction,
         "confidence": confidence,
-        "price": float(latest.close),
         "rsi": float(latest.RSI),
         "regime": regime,
         "quality": quality,
@@ -145,9 +165,8 @@ def scan_one(coin, timeframe, horizon):
         "smc": smc_tag,
         "smc_features": smc_features,
         "vol_confirm": vol_confirm,
-        "horizon": horizon,
-        "timeframe": timeframe,
-    }
+    })
+    return result
 
 
 def range_confidence(rsi):
@@ -202,21 +221,38 @@ def run_agent():
     )
 
     signals = []
+    price_map = {}
     for coin in coins:
+        # Analyse every timeframe for this coin first (so we have the
+        # confirmation timeframe's direction on hand).
+        per_tf = {}
         for horizon, tf in TIMEFRAMES:
             try:
-                s = scan_one(coin, tf, horizon)
-                if s is not None:
-                    signals.append(s)
+                r = analyze_tf(coin, tf, horizon)
+                if r is not None:
+                    per_tf[tf] = r
+                    price_map[coin] = r["price"]
             except Exception as e:
                 print(f"Error scanning {coin} {tf}: {type(e).__name__}: {e}")
 
-    if not signals:
-        print("No signals collected")
+        # Now collect signals, applying multi-timeframe confirmation.
+        for horizon, tf in TIMEFRAMES:
+            r = per_tf.get(tf)
+            if not r or not r.get("has_signal"):
+                continue
+            if r["strategy"] == "Trend":
+                ctf = CONFIRM_TF.get(tf)
+                cr = per_tf.get(ctf)
+                if cr is None or cr["trend_dir"] != r["direction"]:
+                    continue  # confirmation timeframe disagrees -> skip
+                r["confirm"] = f"{ctf} agrees"
+            signals.append(r)
+
+    if not price_map:
+        print("No data collected")
         return
 
     # 1) Update existing paper trades; ping Telegram for any that closed.
-    price_map = {s["coin"]: s["price"] for s in signals}
     closed = paper_trading.update_open_trades(price_map)
     for t in closed:
         mark = "WIN" if t["result"] == "WIN" else "LOSS"
@@ -238,7 +274,7 @@ def run_agent():
     # 3) Log each new setup and open a paper trade for it
     #    (one per coin + side + timeframe).
     for s in qualified:
-        trade = calculate_trade(s["price"], s["direction"], s["atr"])
+        trade = calculate_trade(s["price"], s["direction"], s["atr"], s["strategy"])
         opened = paper_trading.open_trade(
             s["coin"], s["direction"],
             trade["entry"], trade["stop"], trade["tp1"], trade["tp2"],
@@ -265,7 +301,7 @@ def run_agent():
         return
 
     best = qualified[0]
-    trade = calculate_trade(best["price"], best["direction"], best["atr"])
+    trade = calculate_trade(best["price"], best["direction"], best["atr"], best["strategy"])
 
     print(
         f"""===== BEST SIGNAL =====
@@ -274,6 +310,7 @@ Horizon: {best['horizon']} ({best['timeframe']})
 Strategy: {best['strategy']}
 Direction: {best['direction']}
 Confidence: {best['confidence']}%
+Confirmation: {best.get('confirm', 'n/a (range)')}
 Regime: {best['regime']}
 Quality: {best['quality']}
 RSI: {round(best['rsi'], 2)}
@@ -294,7 +331,7 @@ Price: {best['price']}
     if is_new_alert(signature):
         lines = ["CRYPTO AGENT - TOP SIGNALS\n"]
         for i, s in enumerate(top3, 1):
-            tr = calculate_trade(s["price"], s["direction"], s["atr"])
+            tr = calculate_trade(s["price"], s["direction"], s["atr"], s["strategy"])
             smc_line = f"   Structure {s['smc']}\n" if s.get("smc", "-") != "-" else ""
             feats = s.get("smc_features") or []
             feat_line = f"   SMC: {', '.join(feats[:3])}\n" if feats else ""

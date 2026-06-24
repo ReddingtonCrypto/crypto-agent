@@ -1,26 +1,24 @@
-def calculate_trade(price, direction, atr):
+def calculate_trade(price, direction, atr, strategy="Trend"):
+    """Entry, stop and targets sized off ATR (volatility).
 
+    Strategy-specific reward:risk:
+      - Trend : wider target, let winners run   (stop 2x, TP1 3x, TP2 6x ATR)
+      - Range : quicker target, bounded move     (stop 1.5x, TP1 1.5x, TP2 3x ATR)
+    """
+    if strategy == "Range":
+        s_mult, t1_mult, t2_mult = 1.5, 1.5, 3.0
+    else:  # Trend
+        s_mult, t1_mult, t2_mult = 2.0, 3.0, 6.0
+
+    entry = price
     if direction == "LONG":
-
-        entry = price
-
-        stop = price - (atr * 2)
-
-        tp1 = price + (atr * 3)
-
-        tp2 = price + (atr * 5)
-
-
+        stop = price - (atr * s_mult)
+        tp1 = price + (atr * t1_mult)
+        tp2 = price + (atr * t2_mult)
     else:
-
-        entry = price
-
-        stop = price + (atr * 2)
-
-        tp1 = price - (atr * 3)
-
-        tp2 = price - (atr * 5)
-
+        stop = price + (atr * s_mult)
+        tp1 = price - (atr * t1_mult)
+        tp2 = price - (atr * t2_mult)
 
     # Round to 8 decimals, not 4 — otherwise micro-priced coins (SHIB, PEPE,
     # etc.) round to 0.0 and break downstream maths.
@@ -28,5 +26,5 @@ def calculate_trade(price, direction, atr):
         "entry": round(entry, 8),
         "stop": round(stop, 8),
         "tp1": round(tp1, 8),
-        "tp2": round(tp2, 8)
+        "tp2": round(tp2, 8),
     }
