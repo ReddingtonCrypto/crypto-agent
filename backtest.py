@@ -8,6 +8,10 @@ Honest limits: past performance != future; a small fee is modelled but real
 slippage varies; don't over-tune to these numbers.
 """
 
+import json
+import os
+import sys
+
 import ccxt
 import pandas as pd
 
@@ -16,6 +20,23 @@ from risk_engine import calculate_trade
 
 
 EXCHANGE = ccxt.binanceus({"enableRateLimit": True, "timeout": 30000})
+
+CACHE_DIR = "data/bt_cache"
+# Pass --refresh on the command line to re-download; otherwise cached candles
+# are reused so every run tests on IDENTICAL data (clean A/B comparisons).
+REFRESH = "--refresh" in sys.argv
+
+
+def get_history(coin, timeframe):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = os.path.join(CACHE_DIR, f"{coin.replace('/', '_')}_{timeframe}.json")
+    if not REFRESH and os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    bars = EXCHANGE.fetch_ohlcv(coin, timeframe, limit=HISTORY)
+    with open(path, "w") as f:
+        json.dump(bars, f)
+    return bars
 
 COINS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
@@ -50,7 +71,7 @@ def simulate(df, i, direction, stop, tp1):
 
 
 def backtest_one(coin, timeframe, stats):
-    bars = EXCHANGE.fetch_ohlcv(coin, timeframe, limit=HISTORY)
+    bars = get_history(coin, timeframe)
     df = pd.DataFrame(
         bars, columns=["timestamp", "open", "high", "low", "close", "volume"]
     )

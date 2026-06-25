@@ -5,3 +5,4 @@ database/crypto.db
 .claude/
 site/
 data/universe.json
+data/bt_cache/

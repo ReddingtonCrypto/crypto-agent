@@ -158,17 +158,14 @@ def evaluate(closed, coin, timeframe, horizon):
             "stop_level": stop_level,
         }
 
-    # ----- Regime-based strategy (Trend or Range) -----
+    # ----- Trend strategy (only in a trending regime) -----
+    # (Range strategy removed 2026-06-22 — it had negative expectancy. Can be
+    #  rebuilt as a proper mean-reversion model later.)
     if regime in ("TREND_BULL", "TREND_BEAR"):
         result["signals"].append(make(
             "Trend", trend_dir,
             calculate_confidence(latest.EMA20, latest.EMA50, latest.close, latest.RSI),
         ))
-    elif regime == "RANGE":
-        if latest.RSI < 35:
-            result["signals"].append(make("Range", "LONG", range_confidence(latest.RSI)))
-        elif latest.RSI > 65:
-            result["signals"].append(make("Range", "SHORT", range_confidence(latest.RSI)))
 
     # ----- ICT model (independent of regime: sweep -> MSS -> FVG) -----
     ict = detect_ict(closed)
@@ -178,19 +175,6 @@ def evaluate(closed, coin, timeframe, horizon):
         )
 
     return result
-
-
-def range_confidence(rsi):
-    """Confidence for a range (mean-reversion) signal: the more extreme the
-    RSI, the stronger the edge."""
-    c = 55
-    if rsi < 25 or rsi > 75:
-        c += 25
-    elif rsi < 30 or rsi > 70:
-        c += 15
-    elif rsi < 35 or rsi > 65:
-        c += 10
-    return c
 
 
 def passes_filters(s):
@@ -210,10 +194,6 @@ def passes_filters(s):
         if s["direction"] == "SHORT" and s["rsi"] < 25:
             return False
         return True
-
-    if s["strategy"] == "Range":
-        # Range signals are only valid in an actual range.
-        return s["regime"] == "RANGE"
 
     if s["strategy"] == "ICT":
         # The sweep -> MSS -> FVG sequence is the entry logic; the common
