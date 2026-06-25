@@ -40,6 +40,32 @@ CONFIRM_TF = {
     "4h": "1h",
 }
 
+# Risk caps so a one-sided market can't pile up dozens of correlated trades.
+MAX_OPEN_TRADES = 20            # total positions open at once
+MAX_OPEN_PER_DIRECTION = 14     # of those, how many may be the same side
+
+
+def market_bias():
+    """Overall market direction from BTC's daily EMA trend, so we don't take
+    trades against the broad market (e.g. shorting while BTC trends up).
+    Returns 'LONG', 'SHORT', or 'BOTH' (when BTC is roughly flat)."""
+    try:
+        bars = fetch_candles("BTC/USDT", "1d")
+        df = pd.DataFrame(
+            bars, columns=["timestamp", "open", "high", "low", "close", "volume"]
+        )
+        add_indicators(df)
+        latest = df.iloc[:-1].iloc[-1]
+        diff = (latest.EMA20 - latest.EMA50) / latest.close
+        if diff > 0.003:
+            return "LONG"
+        if diff < -0.003:
+            return "SHORT"
+        return "BOTH"
+    except Exception as e:
+        print(f"Market bias unavailable ({type(e).__name__}); allowing both sides.")
+        return "BOTH"
+
 
 def fetch_candles(coin, timeframe, retries=3):
     """Fetch candles for one timeframe with a few retries, so a single
@@ -213,9 +239,11 @@ def run_agent():
     print("==============================\n")
 
     coins = universe.get_universe(exchange, limit=100)
+    bias = market_bias()
     print(
         f"Watching {len(coins)} coins across {len(TIMEFRAMES)} timeframes "
         f"(tradeable on {exchange.id})\n"
+        f"Market bias (BTC daily): {bias}\n"
     )
 
     signals = []
@@ -268,15 +296,26 @@ def run_agent():
         ))
 
     # 2) Find every qualifying signal, best first.
+    #    Market filter: skip trades that fight BTC's broad trend.
     qualified = sorted(
-        [s for s in signals if passes_filters(s)],
+        [
+            s for s in signals
+            if passes_filters(s) and (bias == "BOTH" or s["direction"] == bias)
+        ],
         key=lambda x: x["confidence"],
         reverse=True,
     )
 
-    # 3) Log each new setup and open a paper trade for it
-    #    (one per coin + side + timeframe).
+    # 3) Log each new setup and open a paper trade for it (one per
+    #    coin + side + timeframe), respecting the risk caps.
+    open_count = paper_trading.get_stats()["open"]
+    open_by_dir = paper_trading.open_counts_by_direction()
     for s in qualified:
+        if open_count >= MAX_OPEN_TRADES:
+            break
+        if open_by_dir.get(s["direction"], 0) >= MAX_OPEN_PER_DIRECTION:
+            continue
+
         trade = calculate_trade(
             s["price"], s["direction"], s["atr"], s["strategy"], s.get("stop_level")
         )
@@ -291,6 +330,8 @@ def run_agent():
                 trade["entry"], trade["stop"], trade["tp1"], trade["tp2"],
                 s["confidence"], s["timeframe"], s["strategy"],
             )
+            open_count += 1
+            open_by_dir[s["direction"]] = open_by_dir.get(s["direction"], 0) + 1
 
     # 4) Show the running accuracy scoreboard.
     stats = paper_trading.get_stats()

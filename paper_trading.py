@@ -135,6 +135,16 @@ def get_stats():
     }
 
 
+def open_counts_by_direction():
+    """How many open trades are currently LONG vs SHORT."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT direction, COUNT(*) FROM paper_trades WHERE status='OPEN' GROUP BY direction"
+    ).fetchall()
+    conn.close()
+    return {d: n for d, n in rows}
+
+
 def get_stats_by_strategy():
     """Same scoreboard, broken down per strategy (Trend / Range / ICT) so you
     can see which one is actually winning."""
