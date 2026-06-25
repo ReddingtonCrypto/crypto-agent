@@ -16,6 +16,7 @@ from market_filter import market_quality
 from strategies.smc.market_structure import detect_structure
 from strategies.smc.smc_features import analyze as smc_analyze
 from strategies.smc.ict_model import detect_ict
+from strategies.smc.orderflow import cvd_proxy, cisd, volume_rising
 
 exchange = ccxt.binanceus({
     "enableRateLimit": True,   # space out requests so the exchange doesn't temp-ban us
@@ -145,11 +146,21 @@ def evaluate(closed, coin, timeframe, horizon):
     smc_tag = f"{smc['event']} {smc['direction']}" if smc["event"] else "-"
     feats = smc_analyze(closed)
 
+    # Order-flow reads (CVD proxy + CISD) for direction accuracy.
+    cvd = cvd_proxy(closed)
+    cisd_sig = cisd(closed)
+    vol_rising = volume_rising(closed)
+    flow_tags = []
+    if cvd != "NEUTRAL":
+        flow_tags.append(f"CVD {cvd}")
+    if cisd_sig:
+        flow_tags.append(f"CISD {cisd_sig}")
+
     def make(strategy, direction, base_conf, stop_level=None):
         conf = base_conf
         if vol_confirm:
             conf = min(100, conf + 5)
-        # SMC structure: trend continuation/reversal nudge (trend strategy only).
+        # SMC structure: BOS = continuation (boost), CHoCH = reversal warning.
         if smc["event"] and strategy == "Trend":
             aligned = (
                 (direction == "LONG" and smc["direction"] == "BULLISH")
@@ -168,6 +179,19 @@ def evaluate(closed, coin, timeframe, horizon):
             conf = max(0, conf - 5)
         elif feats["bias"] == "BEARISH" and direction == "LONG":
             conf = max(0, conf - 5)
+        # CVD (order-flow) agreement.
+        if cvd == ("BULLISH" if direction == "LONG" else "BEARISH"):
+            conf = min(100, conf + 5)
+        elif cvd != "NEUTRAL":
+            conf = max(0, conf - 5)
+        # CISD (state-of-delivery flip) agreement.
+        if cisd_sig == ("BULLISH" if direction == "LONG" else "BEARISH"):
+            conf = min(100, conf + 5)
+        elif cisd_sig:
+            conf = max(0, conf - 5)
+        # Real participation: rising volume backs the move.
+        if vol_rising:
+            conf = min(100, conf + 3)
         return {
             "coin": coin,
             "timeframe": timeframe,
@@ -181,7 +205,7 @@ def evaluate(closed, coin, timeframe, horizon):
             "quality": quality,
             "atr": float(latest.ATR),
             "smc": smc_tag,
-            "smc_features": feats["tags"],
+            "smc_features": feats["tags"] + flow_tags,
             "vol_confirm": vol_confirm,
             "stop_level": stop_level,
         }
