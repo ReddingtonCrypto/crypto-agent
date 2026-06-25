@@ -49,7 +49,7 @@ def open_trade(coin, direction, entry, stop, tp1, tp2, score, timeframe, strateg
     return True
 
 
-def update_open_trades(price_map):
+def update_open_trades(bars):
     """Check every open trade against the latest price. Close it as WIN if it
     reached TP1, or LOSS if it hit the stop. `price_map` is {coin: price}."""
     conn = _conn()
@@ -60,22 +60,27 @@ def update_open_trades(price_map):
 
     closed = []
     for tid, coin, direction, entry, stop, tp1, timeframe, strategy in rows:
-        price = price_map.get(coin)
-        if price is None or not entry:  # skip missing price or bad (zero) entry
+        bar = bars.get(coin)
+        if bar is None or not entry:  # skip missing data or bad (zero) entry
             continue
+
+        # Check the candle's HIGH and LOW (intraday), not just the close, so
+        # we don't miss a target/stop that was hit and then retraced.
+        hi = bar["high"]
+        lo = bar["low"]
 
         outcome = None
         exit_price = None
 
         if direction == "LONG":
-            if price <= stop:
+            if lo <= stop:
                 outcome, exit_price = "LOSS", stop
-            elif price >= tp1:
+            elif hi >= tp1:
                 outcome, exit_price = "WIN", tp1
         else:  # SHORT
-            if price >= stop:
+            if hi >= stop:
                 outcome, exit_price = "LOSS", stop
-            elif price <= tp1:
+            elif lo <= tp1:
                 outcome, exit_price = "WIN", tp1
 
         if outcome:

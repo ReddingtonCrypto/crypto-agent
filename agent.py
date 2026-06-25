@@ -102,6 +102,8 @@ def evaluate(closed, coin, timeframe, horizon):
         "horizon": horizon,
         "trend_dir": trend_dir,
         "price": float(latest.close),
+        "high": float(latest.high),
+        "low": float(latest.low),
         "signals": [],
     }
 
@@ -217,7 +219,7 @@ def run_agent():
     )
 
     signals = []
-    price_map = {}
+    bar_map = {}
     for coin in coins:
         # Analyse every timeframe for this coin first (so we have the
         # confirmation timeframe's direction on hand).
@@ -227,7 +229,11 @@ def run_agent():
                 r = analyze_tf(coin, tf, horizon)
                 if r is not None:
                     per_tf[tf] = r
-                    price_map[coin] = r["price"]
+                    # Track trades against the FRESHEST candle (smallest TF,
+                    # which is listed first), using its high/low for intraday hits.
+                    bar_map.setdefault(coin, {
+                        "high": r["high"], "low": r["low"], "price": r["price"],
+                    })
             except Exception as e:
                 print(f"Error scanning {coin} {tf}: {type(e).__name__}: {e}")
 
@@ -245,12 +251,12 @@ def run_agent():
                     sig["confirm"] = f"{ctf} agrees"
                 signals.append(sig)
 
-    if not price_map:
+    if not bar_map:
         print("No data collected")
         return
 
     # 1) Update existing paper trades; ping Telegram for any that closed.
-    closed = paper_trading.update_open_trades(price_map)
+    closed = paper_trading.update_open_trades(bar_map)
     for t in closed:
         mark = "WIN" if t["result"] == "WIN" else "LOSS"
         emoji = "✅" if t["result"] == "WIN" else "❌"
