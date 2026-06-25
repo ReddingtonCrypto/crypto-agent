@@ -117,7 +117,7 @@ def evaluate(closed, coin, timeframe, horizon):
     smc_tag = f"{smc['event']} {smc['direction']}" if smc["event"] else "-"
     feats = smc_analyze(closed)
 
-    def make(strategy, direction, base_conf):
+    def make(strategy, direction, base_conf, stop_level=None):
         conf = base_conf
         if vol_confirm:
             conf = min(100, conf + 5)
@@ -155,6 +155,7 @@ def evaluate(closed, coin, timeframe, horizon):
             "smc": smc_tag,
             "smc_features": feats["tags"],
             "vol_confirm": vol_confirm,
+            "stop_level": stop_level,
         }
 
     # ----- Regime-based strategy (Trend or Range) -----
@@ -172,7 +173,9 @@ def evaluate(closed, coin, timeframe, horizon):
     # ----- ICT model (independent of regime: sweep -> MSS -> FVG) -----
     ict = detect_ict(closed)
     if ict:
-        result["signals"].append(make("ICT", ict["direction"], 85))
+        result["signals"].append(
+            make("ICT", ict["direction"], 85, stop_level=ict["swept"])
+        )
 
     return result
 
@@ -288,7 +291,9 @@ def run_agent():
     # 3) Log each new setup and open a paper trade for it
     #    (one per coin + side + timeframe).
     for s in qualified:
-        trade = calculate_trade(s["price"], s["direction"], s["atr"], s["strategy"])
+        trade = calculate_trade(
+            s["price"], s["direction"], s["atr"], s["strategy"], s.get("stop_level")
+        )
         opened = paper_trading.open_trade(
             s["coin"], s["direction"],
             trade["entry"], trade["stop"], trade["tp1"], trade["tp2"],
@@ -315,7 +320,9 @@ def run_agent():
         return
 
     best = qualified[0]
-    trade = calculate_trade(best["price"], best["direction"], best["atr"], best["strategy"])
+    trade = calculate_trade(
+        best["price"], best["direction"], best["atr"], best["strategy"], best.get("stop_level")
+    )
 
     print(
         f"""===== BEST SIGNAL =====
@@ -345,7 +352,9 @@ Price: {best['price']}
     if is_new_alert(signature):
         lines = ["CRYPTO AGENT - TOP SIGNALS\n"]
         for i, s in enumerate(top3, 1):
-            tr = calculate_trade(s["price"], s["direction"], s["atr"], s["strategy"])
+            tr = calculate_trade(
+                s["price"], s["direction"], s["atr"], s["strategy"], s.get("stop_level")
+            )
             smc_line = f"   Structure {s['smc']}\n" if s.get("smc", "-") != "-" else ""
             feats = s.get("smc_features") or []
             feat_line = f"   SMC: {', '.join(feats[:3])}\n" if feats else ""

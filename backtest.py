@@ -72,7 +72,8 @@ def backtest_one(coin, timeframe, stats):
                 continue  # a trade of this kind is still open
 
             trade = calculate_trade(
-                sig["price"], sig["direction"], sig["atr"], sig["strategy"]
+                sig["price"], sig["direction"], sig["atr"], sig["strategy"],
+                sig.get("stop_level"),
             )
             outcome, exit_price = simulate(df, i, sig["direction"], trade["stop"], trade["tp1"])
             if outcome is None:
