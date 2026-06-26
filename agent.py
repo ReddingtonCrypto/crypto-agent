@@ -46,23 +46,25 @@ MAX_OPEN_TRADES = 20            # total positions open at once
 MAX_OPEN_PER_DIRECTION = 14     # of those, how many may be the same side
 
 
+def _btc_dir(timeframe):
+    bars = fetch_candles("BTC/USDT", timeframe)
+    df = pd.DataFrame(
+        bars, columns=["timestamp", "open", "high", "low", "close", "volume"]
+    )
+    add_indicators(df)
+    latest = df.iloc[:-1].iloc[-1]
+    return "LONG" if latest.EMA20 > latest.EMA50 else "SHORT"
+
+
 def market_bias():
-    """Overall market direction from BTC's daily EMA trend, so we don't take
-    trades against the broad market (e.g. shorting while BTC trends up).
-    Returns 'LONG', 'SHORT', or 'BOTH' (when BTC is roughly flat)."""
+    """Broad-market direction from BTC, combining the DAILY and 4H trend so it
+    stays responsive: if both agree -> that bias; if they disagree (market
+    turning) -> 'BOTH' (no strong bias). Used as a SOFT confidence tilt, not a
+    hard gate."""
     try:
-        bars = fetch_candles("BTC/USDT", "1d")
-        df = pd.DataFrame(
-            bars, columns=["timestamp", "open", "high", "low", "close", "volume"]
-        )
-        add_indicators(df)
-        latest = df.iloc[:-1].iloc[-1]
-        diff = (latest.EMA20 - latest.EMA50) / latest.close
-        if diff > 0.003:
-            return "LONG"
-        if diff < -0.003:
-            return "SHORT"
-        return "BOTH"
+        daily = _btc_dir("1d")
+        h4 = _btc_dir("4h")
+        return daily if daily == h4 else "BOTH"
     except Exception as e:
         print(f"Market bias unavailable ({type(e).__name__}); allowing both sides.")
         return "BOTH"
@@ -208,6 +210,7 @@ def evaluate(closed, coin, timeframe, horizon):
             "smc_features": feats["tags"] + flow_tags,
             "vol_confirm": vol_confirm,
             "stop_level": stop_level,
+            "cvd": cvd,
         }
 
     # ----- Trend strategy (only in a trending regime) -----
@@ -240,7 +243,9 @@ def passes_filters(s):
         return False
 
     if s["strategy"] == "Trend":
-        # Don't chase a trend that's already over-extended.
+        # Backtest showed tightening Trend's entry (confidence bar / CVD gate)
+        # only HURT expectancy — so we leave its rules alone. Trend's live
+        # problem was the forced shorts, which the soft market filter fixes.
         if s["direction"] == "LONG" and s["rsi"] > 75:
             return False
         if s["direction"] == "SHORT" and s["rsi"] < 25:
@@ -319,13 +324,17 @@ def run_agent():
             f"Result: {t['pnl_pct']}%"
         ))
 
-    # 2) Find every qualifying signal, best first.
-    #    Market filter: skip trades that fight BTC's broad trend.
+    # 2) Soft market-bias tilt: favour BTC's direction, but don't hard-block —
+    #    a strong enough counter-setup can still pass. (Caps handle concentration.)
+    if bias != "BOTH":
+        for s in signals:
+            if s["direction"] == bias:
+                s["confidence"] = min(100, s["confidence"] + 5)
+            else:
+                s["confidence"] = max(0, s["confidence"] - 15)
+
     qualified = sorted(
-        [
-            s for s in signals
-            if passes_filters(s) and (bias == "BOTH" or s["direction"] == bias)
-        ],
+        [s for s in signals if passes_filters(s)],
         key=lambda x: x["confidence"],
         reverse=True,
     )
