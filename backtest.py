@@ -19,7 +19,8 @@ import agent
 from risk_engine import calculate_trade
 
 
-EXCHANGE = ccxt.binanceus({"enableRateLimit": True, "timeout": 30000})
+EXCHANGE = ccxt.binanceus({"enableRateLimit": True, "timeout": 30000})  # matches live data source
+# (If binanceus rate-limits your IP locally, temporarily swap to ccxt.mexc — prices are ~identical.)
 
 CACHE_DIR = "data/bt_cache"
 # Pass --refresh on the command line to re-download; otherwise cached candles
@@ -42,7 +43,7 @@ COINS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
     "AVAX/USDT", "LINK/USDT", "LTC/USDT", "DOT/USDT", "DOGE/USDT",
 ]
-TIMEFRAMES = ["1h", "4h"]
+TIMEFRAMES = ["1h", "4h"]   # mirror the live bot's timeframes
 HISTORY = 500            # candles to pull per coin/timeframe
 WINDOW = 160             # trailing candles handed to the strategy each bar
 FEE = 0.001              # 0.1% per side modelled on the result

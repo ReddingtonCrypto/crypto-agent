@@ -27,16 +27,15 @@ exchange = ccxt.binanceus({
 # Trade horizons -> the candle timeframe(s) each one scans.
 # Day Trade = minutes/hours, Swing = a few days, Long-term = weeks/months.
 TIMEFRAMES = [
-    ("Day Trade", "15m"),
     ("Day Trade", "1h"),
     ("Swing", "4h"),
 ]
+# (15m removed 2026-06-30 — backtest proved it dragged Trend negative.)
 
 # Which timeframe must AGREE on direction before a Trend signal is allowed.
-# Day Trade confirms UP the ladder (don't fight the bigger trend);
-# Swing confirms DOWN the ladder (a reversal shows on the lower TF first).
+# 1h confirms UP the ladder (don't fight the bigger trend);
+# 4h confirms DOWN the ladder (a reversal shows on the lower TF first).
 CONFIRM_TF = {
-    "15m": "1h",
     "1h": "4h",
     "4h": "1h",
 }
