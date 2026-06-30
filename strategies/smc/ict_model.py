@@ -15,6 +15,28 @@ from strategies.smc.market_structure import find_swings
 from strategies.smc.smc_features import fair_value_gap
 
 
+def detect_mss(df, window=12):
+    """Standalone Market Structure Shift: liquidity sweep + close beyond the
+    opposite pivot — WITHOUT requiring an FVG (so it's a superset of ICT and
+    fires more often). Returns {direction, swept} or None."""
+    if len(df) < window + 10:
+        return None
+    highs, lows = find_swings(df, lookback=2)
+    if not highs or not lows:
+        return None
+
+    seg = df.iloc[-window:]
+    last_close = float(df["close"].iloc[-1])
+    swing_high = highs[-1][1]
+    swing_low = lows[-1][1]
+
+    if bool((seg["low"] < swing_low).any()) and last_close > swing_high:
+        return {"direction": "LONG", "swept": float(swing_low)}
+    if bool((seg["high"] > swing_high).any()) and last_close < swing_low:
+        return {"direction": "SHORT", "swept": float(swing_high)}
+    return None
+
+
 def detect_ict(df, window=12):
     if len(df) < window + 10:
         return None

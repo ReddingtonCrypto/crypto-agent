@@ -15,7 +15,7 @@ from regime_engine import get_regime
 from market_filter import market_quality
 from strategies.smc.market_structure import detect_structure
 from strategies.smc.smc_features import analyze as smc_analyze
-from strategies.smc.ict_model import detect_ict
+from strategies.smc.ict_model import detect_ict, detect_mss
 from strategies.smc.orderflow import cvd_proxy, cisd, volume_rising
 
 exchange = ccxt.binanceus({
@@ -43,6 +43,9 @@ CONFIRM_TF = {
 # Risk caps so a one-sided market can't pile up dozens of correlated trades.
 MAX_OPEN_TRADES = 20            # total positions open at once
 MAX_OPEN_PER_DIRECTION = 14     # of those, how many may be the same side
+
+ENABLE_TREND = False            # Trend strategy off (backtest: net loser); ICT-focused
+ENABLE_MSS = False              # standalone MSS off (backtest: ~break-even +0.04%); ICT (sweep+MSS+FVG) is the edge
 
 
 def _btc_dir(timeframe):
@@ -212,21 +215,29 @@ def evaluate(closed, coin, timeframe, horizon):
             "cvd": cvd,
         }
 
-    # ----- Trend strategy (only in a trending regime) -----
-    # (Range strategy removed 2026-06-22 — it had negative expectancy. Can be
-    #  rebuilt as a proper mean-reversion model later.)
-    if regime in ("TREND_BULL", "TREND_BEAR"):
+    # ----- Trend strategy: DISABLED 2026-06-30 (backtest: net loser). The EMA
+    #  trend_dir is still used for multi-timeframe confirmation above. -----
+    if ENABLE_TREND and regime in ("TREND_BULL", "TREND_BEAR"):
         result["signals"].append(make(
             "Trend", trend_dir,
             calculate_confidence(latest.EMA20, latest.EMA50, latest.close, latest.RSI),
         ))
 
-    # ----- ICT model (independent of regime: sweep -> MSS -> FVG) -----
+    # ----- ICT model (sweep -> MSS -> FVG) -----
     ict = detect_ict(closed)
     if ict:
         result["signals"].append(
             make("ICT", ict["direction"], 85, stop_level=ict["swept"])
         )
+
+    # ----- MSS strategy (sweep -> MSS, no FVG) — DISABLED: backtest ~break-even.
+    #  The FVG confluence (in ICT) is what makes the edge. -----
+    if ENABLE_MSS:
+        mss = detect_mss(closed)
+        if mss:
+            result["signals"].append(
+                make("MSS", mss["direction"], 80, stop_level=mss["swept"])
+            )
 
     return result
 
@@ -251,9 +262,9 @@ def passes_filters(s):
             return False
         return True
 
-    if s["strategy"] == "ICT":
-        # The sweep -> MSS -> FVG sequence is the entry logic; the common
-        # checks above (confidence/quality/volume) are enough.
+    if s["strategy"] in ("ICT", "MSS"):
+        # The structure sequence is the entry logic; the common checks above
+        # (confidence/quality/volume) are enough.
         return True
 
     return False

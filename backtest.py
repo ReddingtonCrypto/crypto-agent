@@ -8,6 +8,7 @@ Honest limits: past performance != future; a small fee is modelled but real
 slippage varies; don't over-tune to these numbers.
 """
 
+import bisect
 import json
 import os
 import sys
@@ -16,11 +17,16 @@ import ccxt
 import pandas as pd
 
 import agent
+import universe
 from risk_engine import calculate_trade
 
 
-EXCHANGE = ccxt.binanceus({"enableRateLimit": True, "timeout": 30000})  # matches live data source
-# (If binanceus rate-limits your IP locally, temporarily swap to ccxt.mexc — prices are ~identical.)
+# MEXC for the backtest data source: reachable everywhere, prices ~identical to
+# binanceus (the live venue). Switch to ccxt.binanceus if you prefer exact match.
+EXCHANGE = ccxt.mexc({"enableRateLimit": True, "timeout": 30000})
+
+USE_MARKET_FILTER = True   # apply the live BTC market-bias tilt at each bar
+COINS_LIMIT = 40           # mirror live: top ~40 coins by market cap on the exchange
 
 CACHE_DIR = "data/bt_cache"
 # Pass --refresh on the command line to re-download; otherwise cached candles
@@ -48,6 +54,46 @@ HISTORY = 500            # candles to pull per coin/timeframe
 WINDOW = 160             # trailing candles handed to the strategy each bar
 FEE = 0.001              # 0.1% per side modelled on the result
 MAX_HOLD = 200           # give a trade this many bars to resolve, else drop
+
+
+class BTCContext:
+    """Pre-computes BTC's daily + 4h trend over history so the backtest can ask
+    'what was the market bias at timestamp T?' — exactly like the live bot, with
+    no look-ahead (only uses BTC candles already CLOSED by T)."""
+
+    PERIODS = {"1d": 86_400_000, "4h": 14_400_000}
+
+    def __init__(self):
+        self.daily_t, self.daily_d = self._load("1d")
+        self.h4_t, self.h4_d = self._load("4h")
+
+    def _load(self, tf):
+        df = pd.DataFrame(
+            get_history("BTC/USDT", tf),
+            columns=["timestamp", "open", "high", "low", "close", "volume"],
+        )
+        agent.add_indicators(df)
+        period = self.PERIODS[tf]
+        times, dirs = [], []
+        for idx in range(len(df)):
+            ema50 = df["EMA50"].iat[idx]
+            if pd.isna(ema50):
+                continue
+            times.append(int(df["timestamp"].iat[idx]) + period)  # candle CLOSE time
+            dirs.append("LONG" if df["EMA20"].iat[idx] > ema50 else "SHORT")
+        return times, dirs
+
+    @staticmethod
+    def _dir(times, dirs, ts):
+        k = bisect.bisect_right(times, ts) - 1
+        return dirs[k] if k >= 0 else None
+
+    def bias_at(self, ts):
+        d = self._dir(self.daily_t, self.daily_d, ts)
+        h = self._dir(self.h4_t, self.h4_d, ts)
+        if d is None or h is None:
+            return "BOTH"
+        return d if d == h else "BOTH"
 
 
 # Break-even stop: BACKTESTED at 0.5 and 0.8 triggers — both HURT (cuts winners
@@ -92,7 +138,7 @@ def simulate(df, i, direction, entry, stop, tp1):
     return None, None, None
 
 
-def backtest_one(coin, timeframe, stats):
+def backtest_one(coin, timeframe, stats, btc_ctx):
     bars = get_history(coin, timeframe)
     df = pd.DataFrame(
         bars, columns=["timestamp", "open", "high", "low", "close", "volume"]
@@ -107,7 +153,16 @@ def backtest_one(coin, timeframe, stats):
     for i in range(60, n - 1):
         window = df.iloc[max(0, i - WINDOW):i + 1]
         res = agent.evaluate(window, coin, timeframe, "BT")
+
+        # Market-bias tilt at this bar's time (same as live), no look-ahead.
+        bias = btc_ctx.bias_at(int(df["timestamp"].iat[i])) if btc_ctx else "BOTH"
+
         for sig in res["signals"]:
+            if bias != "BOTH":
+                if sig["direction"] == bias:
+                    sig["confidence"] = min(100, sig["confidence"] + 5)
+                else:
+                    sig["confidence"] = max(0, sig["confidence"] - 15)
             if not agent.passes_filters(sig):
                 continue
             key = (sig["strategy"], sig["direction"])
@@ -140,17 +195,26 @@ def backtest_one(coin, timeframe, stats):
 
 
 def main():
+    # Mirror live: top coins by market cap available on the exchange.
+    try:
+        coins = universe.get_universe(EXCHANGE, 100)[:COINS_LIMIT]
+    except Exception as e:
+        print(f"universe unavailable ({type(e).__name__}); using fallback list")
+        coins = COINS
+    print(f"Universe: {len(coins)} coins | market filter: {USE_MARKET_FILTER}")
+
+    btc_ctx = BTCContext() if USE_MARKET_FILTER else None
+
     stats = {}
-    for coin in COINS:
+    for coin in coins:
         for tf in TIMEFRAMES:
             try:
-                backtest_one(coin, tf, stats)
-                print(f"  done {coin} {tf}")
+                backtest_one(coin, tf, stats, btc_ctx)
             except Exception as e:
                 print(f"  skip {coin} {tf}: {type(e).__name__}: {e}")
 
     print("\n========== BACKTEST RESULTS ==========")
-    print(f"Coins: {len(COINS)} | Timeframes: {TIMEFRAMES} | ~{HISTORY} candles each")
+    print(f"Coins: {len(coins)} | Timeframes: {TIMEFRAMES} | market filter: {USE_MARKET_FILTER}")
     print(f"Fee modelled: {FEE*200:.1f}% round-trip\n")
     print(f"{'Strategy':<10} {'Trades':>7} {'WinRate':>8} {'TotalPnL':>9} {'Avg/Trade':>10}")
     for strat in sorted(stats, key=lambda k: stats[k]["pnl"], reverse=True):
