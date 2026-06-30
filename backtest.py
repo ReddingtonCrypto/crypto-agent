@@ -50,25 +50,46 @@ FEE = 0.001              # 0.1% per side modelled on the result
 MAX_HOLD = 200           # give a trade this many bars to resolve, else drop
 
 
-def simulate(df, i, direction, stop, tp1):
-    """Walk forward from bar i+1; return ('WIN'|'LOSS', exit_price) using the
-    candle highs/lows, or (None, None) if it never resolves."""
+# Break-even stop: BACKTESTED at 0.5 and 0.8 triggers — both HURT (cuts winners
+# short). Left here, OFF, for future experiments. Don't enable without re-testing.
+USE_BE = False
+BE_TRIGGER_FRAC = 0.8    # fraction of the way to TP1 before moving stop to entry
+
+
+def simulate(df, i, direction, entry, stop, tp1):
+    """Walk forward from bar i+1; return (outcome, exit_price, close_bar) using
+    candle highs/lows, or (None, None, None) if it never resolves.
+
+    If USE_BE: once price runs BE_TRIGGER_FRAC of the way to TP1, the stop is
+    moved to entry (break-even), so a winner that reverses exits at ~0 instead
+    of a full loss."""
     highs = df["high"].to_numpy()
     lows = df["low"].to_numpy()
     end = min(len(df), i + 1 + MAX_HOLD)
+    cur_stop = stop
+    armed = False
+    if direction == "LONG":
+        be_trigger = entry + BE_TRIGGER_FRAC * (tp1 - entry)
+    else:
+        be_trigger = entry - BE_TRIGGER_FRAC * (entry - tp1)
+
     for k in range(i + 1, end):
         hi, lo = highs[k], lows[k]
         if direction == "LONG":
-            if lo <= stop:
-                return "LOSS", stop
+            if USE_BE and not armed and hi >= be_trigger:
+                armed, cur_stop = True, entry
+            if lo <= cur_stop:
+                return ("WIN" if cur_stop > entry else "LOSS"), cur_stop, k
             if hi >= tp1:
-                return "WIN", tp1
+                return "WIN", tp1, k
         else:
-            if hi >= stop:
-                return "LOSS", stop
+            if USE_BE and not armed and lo <= be_trigger:
+                armed, cur_stop = True, entry
+            if hi >= cur_stop:
+                return ("WIN" if cur_stop < entry else "LOSS"), cur_stop, k
             if lo <= tp1:
-                return "WIN", tp1
-    return None, None
+                return "WIN", tp1, k
+    return None, None, None
 
 
 def backtest_one(coin, timeframe, stats):
@@ -97,7 +118,9 @@ def backtest_one(coin, timeframe, stats):
                 sig["price"], sig["direction"], sig["atr"], sig["strategy"],
                 sig.get("stop_level"),
             )
-            outcome, exit_price = simulate(df, i, sig["direction"], trade["stop"], trade["tp1"])
+            outcome, exit_price, close_bar = simulate(
+                df, i, sig["direction"], trade["entry"], trade["stop"], trade["tp1"]
+            )
             if outcome is None:
                 continue
 
@@ -106,17 +129,6 @@ def backtest_one(coin, timeframe, stats):
                 pnl = -pnl
             pnl -= FEE * 2 * 100  # entry + exit fees
 
-            # Find when it closed, so we don't overlap trades of the same kind.
-            close_bar = i + 1
-            highs = df["high"].to_numpy(); lows = df["low"].to_numpy()
-            for k in range(i + 1, min(n, i + 1 + MAX_HOLD)):
-                done = (
-                    (sig["direction"] == "LONG" and (lows[k] <= trade["stop"] or highs[k] >= trade["tp1"]))
-                    or (sig["direction"] == "SHORT" and (highs[k] >= trade["stop"] or lows[k] <= trade["tp1"]))
-                )
-                if done:
-                    close_bar = k
-                    break
             open_until[key] = close_bar
 
             s = stats.setdefault(sig["strategy"], {"wins": 0, "losses": 0, "pnl": 0.0})
