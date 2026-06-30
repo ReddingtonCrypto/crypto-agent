@@ -26,7 +26,7 @@ from risk_engine import calculate_trade
 EXCHANGE = ccxt.mexc({"enableRateLimit": True, "timeout": 30000})
 
 USE_MARKET_FILTER = True   # apply the live BTC market-bias tilt at each bar
-COINS_LIMIT = 40           # mirror live: top ~40 coins by market cap on the exchange
+COINS_LIMIT = 20           # mirror live: top 20 by market cap (alts drag the edge)
 
 CACHE_DIR = "data/bt_cache"
 # Pass --refresh on the command line to re-download; otherwise cached candles
@@ -48,6 +48,20 @@ def get_history(coin, timeframe):
 COINS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
     "AVAX/USDT", "LINK/USDT", "LTC/USDT", "DOT/USDT", "DOGE/USDT",
+]
+
+# Majors vs majors+alts test: top ~19 majors, then a batch of smaller alts.
+MAJORS = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", "BNB/USDT",
+    "TRX/USDT", "LINK/USDT", "AVAX/USDT", "DOT/USDT", "LTC/USDT", "BCH/USDT",
+    "DOGE/USDT", "UNI/USDT", "ATOM/USDT", "XLM/USDT", "NEAR/USDT", "APT/USDT",
+    "AAVE/USDT",
+]
+ALTS = [
+    "ARB/USDT", "OP/USDT", "SUI/USDT", "INJ/USDT", "SEI/USDT", "TIA/USDT",
+    "RUNE/USDT", "ALGO/USDT", "FIL/USDT", "HBAR/USDT", "IMX/USDT", "GRT/USDT",
+    "SAND/USDT", "MANA/USDT", "AXS/USDT", "ETC/USDT", "CRV/USDT", "RENDER/USDT",
+    "ENA/USDT",
 ]
 TIMEFRAMES = ["1h", "4h"]   # mirror the live bot's timeframes
 HISTORY = 500            # candles to pull per coin/timeframe
@@ -235,12 +249,17 @@ def backtest_one(coin, timeframe, stats, btc_ctx):
 
 
 def main():
-    # Mirror live: top coins by market cap available on the exchange.
-    try:
-        coins = universe.get_universe(EXCHANGE, 100)[:COINS_LIMIT]
-    except Exception as e:
-        print(f"universe unavailable ({type(e).__name__}); using fallback list")
-        coins = COINS
+    if "--majors" in sys.argv:
+        coins = MAJORS
+    elif "--alts" in sys.argv:
+        coins = MAJORS + ALTS
+    else:
+        # Mirror live: top coins by market cap available on the exchange.
+        try:
+            coins = universe.get_universe(EXCHANGE, 100)[:COINS_LIMIT]
+        except Exception as e:
+            print(f"universe unavailable ({type(e).__name__}); using fallback list")
+            coins = COINS
     print(f"Universe: {len(coins)} coins | market filter: {USE_MARKET_FILTER}")
 
     btc_ctx = BTCContext() if USE_MARKET_FILTER else None

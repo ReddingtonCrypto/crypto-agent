@@ -46,6 +46,7 @@ MAX_OPEN_PER_DIRECTION = 14     # of those, how many may be the same side
 
 ENABLE_TREND = False            # Trend strategy off (backtest: net loser); ICT-focused
 ENABLE_MSS = False              # standalone MSS off (backtest: ~break-even +0.04%); ICT (sweep+MSS+FVG) is the edge
+UNIVERSE_SIZE = 20              # top N by market cap only — alts crush the edge (backtest: majors +0.76 vs +alts +0.02)
 
 
 def _btc_dir(timeframe):
@@ -277,11 +278,11 @@ def run_agent():
     print(datetime.now())
     print("==============================\n")
 
-    coins = universe.get_universe(exchange, limit=100)
+    coins = universe.get_universe(exchange, limit=100)[:UNIVERSE_SIZE]
     bias = market_bias()
     print(
-        f"Watching {len(coins)} coins across {len(TIMEFRAMES)} timeframes "
-        f"(tradeable on {exchange.id})\n"
+        f"Watching {len(coins)} coins (top {UNIVERSE_SIZE} by mcap) across "
+        f"{len(TIMEFRAMES)} timeframes on {exchange.id}\n"
         f"Market bias (BTC daily): {bias}\n"
     )
 
