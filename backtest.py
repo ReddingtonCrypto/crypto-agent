@@ -101,18 +101,58 @@ class BTCContext:
 USE_BE = False
 BE_TRIGGER_FRAC = 0.8    # fraction of the way to TP1 before moving stop to entry
 
+# Trailing stop: after price runs TRAIL_ARM_R risk-multiples in favour, trail the
+# stop TRAIL_DIST_R behind the best price (no fixed TP — let winners run).
+# Trailing stop: BACKTESTED arm1R/trail1.5R (-0.28%) and arm2R/trail3R (-1.68%)
+# — both HURT badly. ICT's edge is BANKING the fixed 2R/3R structure target;
+# letting winners "run" gives it back. Leave OFF. Don't change ICT's exits.
+USE_TRAIL = False
+TRAIL_ARM_R = 1.0
+TRAIL_DIST_R = 1.5
+
 
 def simulate(df, i, direction, entry, stop, tp1):
     """Walk forward from bar i+1; return (outcome, exit_price, close_bar) using
-    candle highs/lows, or (None, None, None) if it never resolves.
-
-    If USE_BE: once price runs BE_TRIGGER_FRAC of the way to TP1, the stop is
-    moved to entry (break-even), so a winner that reverses exits at ~0 instead
-    of a full loss."""
+    candle highs/lows, or (None, None, None) if it never resolves."""
     highs = df["high"].to_numpy()
     lows = df["low"].to_numpy()
     end = min(len(df), i + 1 + MAX_HOLD)
     cur_stop = stop
+    R = abs(entry - stop) or 1e-9
+
+    # ----- Trailing-stop mode (no fixed TP) -----
+    if USE_TRAIL:
+        if direction == "LONG":
+            arm = entry + TRAIL_ARM_R * R
+            peak = entry
+            armed = False
+            for k in range(i + 1, end):
+                hi, lo = highs[k], lows[k]
+                if hi > peak:
+                    peak = hi
+                if not armed and hi >= arm:
+                    armed = True
+                if armed:
+                    cur_stop = max(cur_stop, peak - TRAIL_DIST_R * R)
+                if lo <= cur_stop:
+                    return ("WIN" if cur_stop > entry else "LOSS"), cur_stop, k
+        else:
+            arm = entry - TRAIL_ARM_R * R
+            trough = entry
+            armed = False
+            for k in range(i + 1, end):
+                hi, lo = highs[k], lows[k]
+                if lo < trough:
+                    trough = lo
+                if not armed and lo <= arm:
+                    armed = True
+                if armed:
+                    cur_stop = min(cur_stop, trough + TRAIL_DIST_R * R)
+                if hi >= cur_stop:
+                    return ("WIN" if cur_stop < entry else "LOSS"), cur_stop, k
+        return None, None, None
+
+    # ----- Fixed TP1 / stop mode (with optional break-even) -----
     armed = False
     if direction == "LONG":
         be_trigger = entry + BE_TRIGGER_FRAC * (tp1 - entry)
