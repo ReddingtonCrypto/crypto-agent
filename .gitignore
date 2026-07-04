@@ -6,3 +6,4 @@ database/crypto.db
 site/
 data/universe.json
 data/bt_cache/
+data/wf_cache/
