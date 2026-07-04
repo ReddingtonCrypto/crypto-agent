@@ -7,6 +7,7 @@ import pandas as pd
 
 import universe
 import paper_trading
+import health_monitor
 from formatting import fmt_price
 from risk_engine import calculate_trade
 from signal_pipeline import save_signal, send_alert, is_new_alert, record_alert
@@ -56,6 +57,11 @@ UNIVERSE_SIZE = 20              # top N by market cap only — alts crush the ed
 # ~2/3, so signals get rarer. Toggle here; backtester reads the same flags.
 ENABLE_VP = True
 VP_BINS = 50
+
+# Strategy Health Monitor: pause coins whose RECENT live expectancy has decayed
+# (see health_monitor.py). Adaptive + conservative-only — it can pause and later
+# auto-recover a coin, never loosen risk. Live-only (needs accumulated results).
+ENABLE_HEALTH = True
 
 
 def _btc_dir(timeframe):
@@ -383,9 +389,14 @@ def run_agent():
     #    coin + side + timeframe), respecting the risk caps.
     open_count = paper_trading.get_stats()["open"]
     open_by_dir = paper_trading.open_counts_by_direction()
+    paused = health_monitor.paused_coins() if ENABLE_HEALTH else set()
+    if paused:
+        print(f"Health monitor: paused (decaying) coins skipped -> {sorted(paused)}")
     for s in qualified:
         if open_count >= MAX_OPEN_TRADES:
             break
+        if s["coin"] in paused:            # recent live expectancy decayed -> sit out
+            continue
         if open_by_dir.get(s["direction"], 0) >= MAX_OPEN_PER_DIRECTION:
             continue
 

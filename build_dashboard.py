@@ -9,6 +9,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from formatting import fmt_price
+import health_monitor
 
 
 DB = "database/crypto.db"
@@ -108,6 +109,9 @@ def build():
     strat_rows = _by_strategy(conn)
     conn.close()
 
+    health = health_monitor.coin_health()
+    paused = sorted(c for c, h in health.items() if h["status"] == "PAUSED")
+
     closed = wins + losses
     win_rate = round(wins / closed * 100, 1) if closed else 0.0
     avg = round(avg, 2) if avg is not None else 0.0
@@ -128,6 +132,26 @@ def build():
         )
     else:
         strat_table = '<div class="empty">No strategy results yet.</div>'
+
+    # Health monitor: paused coins (recent expectancy decayed) + trailing window
+    if paused:
+        hrows = "".join(
+            f"<tr><td>{c}</td><td>{health[c]['trades']}</td>"
+            f"<td>{health[c]['win_rate']}%</td>"
+            f"<td class=\"loss\">{health[c]['avg_pnl']}%</td></tr>"
+            for c in paused
+        )
+        health_table = (
+            f"<div class='sub'>Coins paused for poor results over the last "
+            f"{health_monitor.HEALTH_WINDOW_DAYS} days (auto-recover as trades age out).</div>"
+            "<table><tr><th>Coin</th><th>Recent trades</th><th>Win rate</th>"
+            f"<th>Avg P&L</th></tr>{hrows}</table>"
+        )
+    else:
+        health_table = (
+            '<div class="empty">All coins healthy — none paused '
+            f"(watching the last {health_monitor.HEALTH_WINDOW_DAYS} days).</div>"
+        )
 
     # Open-trades table
     if open_t:
@@ -186,6 +210,8 @@ def build():
         "</div>"
         "<h2>Strategy scoreboard</h2>"
         f"{strat_table}"
+        "<h2>Health monitor</h2>"
+        f"{health_table}"
         "<h2>Open trades</h2>"
         f"{open_table}"
         "<h2>Recent results</h2>"
