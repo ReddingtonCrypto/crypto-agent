@@ -17,6 +17,7 @@ from strategies.smc.market_structure import detect_structure
 from strategies.smc.smc_features import analyze as smc_analyze
 from strategies.smc.ict_model import detect_ict, detect_mss
 from strategies.smc.orderflow import cvd_proxy, cisd, volume_rising
+from strategies.smc.volume_profile import value_area
 
 exchange = ccxt.binanceus({
     "enableRateLimit": True,   # space out requests so the exchange doesn't temp-ban us
@@ -47,6 +48,14 @@ MAX_OPEN_PER_DIRECTION = 14     # of those, how many may be the same side
 ENABLE_TREND = False            # Trend strategy off (backtest: net loser); ICT-focused
 ENABLE_MSS = False              # standalone MSS off (backtest: ~break-even +0.04%); ICT (sweep+MSS+FVG) is the edge
 UNIVERSE_SIZE = 20              # top N by market cap only — alts crush the edge (backtest: majors +0.76 vs +alts +0.02)
+
+# Volume Profile location filter (backtest: +0.36 -> ~+0.50-0.75/trade on majors,
+# +1.54 -> +2.34 on the live universe; robust across 30/50/70 bins). Only take a
+# LONG that enters at/below the volume POC (discount) or a SHORT at/above it
+# (premium) — don't chase into where volume was already done. Cuts trade count
+# ~2/3, so signals get rarer. Toggle here; backtester reads the same flags.
+ENABLE_VP = True
+VP_BINS = 50
 
 
 def _btc_dir(timeframe):
@@ -151,6 +160,11 @@ def evaluate(closed, coin, timeframe, horizon):
     smc_tag = f"{smc['event']} {smc['direction']}" if smc["event"] else "-"
     feats = smc_analyze(closed)
 
+    # Volume Profile POC — the price where most volume traded, used as a
+    # location filter (enter at discount/premium, not into the POC magnet).
+    vp = value_area(closed, bins=VP_BINS) if ENABLE_VP else None
+    vp_poc = vp["poc"] if vp else None
+
     # Order-flow reads (CVD proxy + CISD) for direction accuracy.
     cvd = cvd_proxy(closed)
     cisd_sig = cisd(closed)
@@ -214,6 +228,7 @@ def evaluate(closed, coin, timeframe, horizon):
             "vol_confirm": vol_confirm,
             "stop_level": stop_level,
             "cvd": cvd,
+            "vp_poc": vp_poc,
         }
 
     # ----- Trend strategy: DISABLED 2026-06-30 (backtest: net loser). The EMA
@@ -264,6 +279,13 @@ def passes_filters(s):
         return True
 
     if s["strategy"] in ("ICT", "MSS"):
+        # Volume Profile location filter: don't chase into the POC — LONG must
+        # enter at/below it (discount), SHORT at/above it (premium).
+        if ENABLE_VP and s.get("vp_poc") is not None:
+            if s["direction"] == "LONG" and s["price"] > s["vp_poc"]:
+                return False
+            if s["direction"] == "SHORT" and s["price"] < s["vp_poc"]:
+                return False
         # The structure sequence is the entry logic; the common checks above
         # (confidence/quality/volume) are enough.
         return True

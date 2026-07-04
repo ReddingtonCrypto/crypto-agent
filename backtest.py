@@ -20,6 +20,16 @@ import agent
 import universe
 from risk_engine import calculate_trade
 
+# The Volume Profile POC filter now lives in agent.passes_filters (so the
+# backtest mirrors live automatically). A/B it from the CLI:
+#   --no-vp        : disable the VP filter for this run.
+#   --vp-bins=N    : override the profile resolution (default 50).
+if "--no-vp" in sys.argv:
+    agent.ENABLE_VP = False
+for _a in sys.argv:
+    if _a.startswith("--vp-bins="):
+        agent.VP_BINS = int(_a.split("=", 1)[1])
+
 
 # MEXC for the backtest data source: reachable everywhere, prices ~identical to
 # binanceus (the live venue). Switch to ccxt.binanceus if you prefer exact match.
