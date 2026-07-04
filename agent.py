@@ -323,17 +323,24 @@ def run_agent():
         print("No data collected")
         return
 
-    # 1) Update existing paper trades; ping Telegram for any that closed.
-    closed = paper_trading.update_open_trades(bar_map)
-    for t in closed:
-        mark = "WIN" if t["result"] == "WIN" else "LOSS"
-        emoji = "✅" if t["result"] == "WIN" else "❌"
+    # 1) Advance paper trades (partial-exit plan); ping Telegram for each event
+    #    — a partial bank at TP1, or a full close (WIN/LOSS/EXPIRED).
+    for t in paper_trading.update_open_trades(bar_map):
+        mark = t["result"]
+        emoji = {"WIN": "✅", "LOSS": "❌", "EXPIRED": "⌛", "TP1": "🎯"}.get(mark, "❌")
         tf = t.get("timeframe", "")
-        print(f"Trade closed: {t['coin']} {t['direction']} {tf} {mark} {t['pnl_pct']}%")
-        asyncio.run(send_alert(
-            f"{emoji} {mark}  {t['coin']}  {t['direction']}  ({tf})\n"
-            f"Result: {t['pnl_pct']}%"
-        ))
+        if mark == "TP1":
+            print(f"TP1 hit (half banked): {t['coin']} {t['direction']} {tf} +{t['pnl_pct']}%")
+            asyncio.run(send_alert(
+                f"{emoji} TP1 HIT — half banked  {t['coin']}  {t['direction']}  ({tf})\n"
+                f"Locked: +{t['pnl_pct']}%  ·  runner to TP2, stop at break-even"
+            ))
+        else:
+            print(f"Trade closed: {t['coin']} {t['direction']} {tf} {mark} {t['pnl_pct']}%")
+            asyncio.run(send_alert(
+                f"{emoji} {mark}  {t['coin']}  {t['direction']}  ({tf})\n"
+                f"Result: {t['pnl_pct']}%"
+            ))
 
     # 2) Soft market-bias tilt: favour BTC's direction, but don't hard-block —
     #    a strong enough counter-setup can still pass. (Caps handle concentration.)
@@ -383,6 +390,7 @@ def run_agent():
         f"\n=== PAPER TRADING SCOREBOARD ===\n"
         f"Open: {stats['open']} | Closed: {stats['closed']} | "
         f"Wins: {stats['wins']} | Losses: {stats['losses']} | "
+        f"Expired: {stats['expired']} | "
         f"Win rate: {stats['win_rate']}% | Avg P&L: {stats['avg_pnl']}%\n"
     )
 
