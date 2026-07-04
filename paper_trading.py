@@ -75,67 +75,117 @@ def open_trade(coin, direction, entry, stop, tp1, tp2, score, timeframe, strateg
     return True
 
 
+PARTIAL_FRAC = 0.5   # fraction of the position banked at TP1 (rest runs to TP2)
+
+
+def _leg(entry, exit_price, direction):
+    """Signed % return of one exit level, favourable-positive for the trade."""
+    r = (exit_price - entry) / entry * 100.0
+    return -r if direction == "SHORT" else r
+
+
 def update_open_trades(bars):
-    """Check every open trade against the latest price. Close it as WIN if it
-    reached TP1, or LOSS if it hit the stop. `price_map` is {coin: price}."""
+    """Advance every open trade against the latest candle, running the backtested
+    partial-exit plan (Variant C):
+
+      1. Bank PARTIAL_FRAC of the position at TP1 (=2R) and move the runner's
+         stop to break-even. The trade stays OPEN.
+      2. Close the runner at TP2 (=4R), at break-even, or via the time-stop.
+
+    Final P&L blends the banked half and the runner. Returns a list of events
+    (partial banks and full closes) for Telegram. `bars` is {coin: {high,low,price}}.
+    """
     conn = _conn()
     rows = conn.execute(
-        "SELECT id, coin, direction, entry, stop, tp1, timeframe, strategy, opened_at "
-        "FROM paper_trades WHERE status='OPEN'"
+        "SELECT id, coin, direction, entry, stop, tp1, tp2, timeframe, strategy, "
+        "opened_at, tp1_hit, realized_pct FROM paper_trades WHERE status='OPEN'"
     ).fetchall()
 
-    closed = []
-    for tid, coin, direction, entry, stop, tp1, timeframe, strategy, opened_at in rows:
+    events = []
+    for (tid, coin, direction, entry, stop, tp1, tp2, timeframe, strategy,
+         opened_at, tp1_hit, realized_pct) in rows:
         bar = bars.get(coin)
         if bar is None or not entry:  # skip missing data or bad (zero) entry
             continue
 
-        # Check the candle's HIGH and LOW (intraday), not just the close, so
-        # we don't miss a target/stop that was hit and then retraced.
-        hi = bar["high"]
-        lo = bar["low"]
+        # Intraday high/low so we don't miss a level hit then retraced.
+        hi, lo = bar["high"], bar["low"]
+        realized_pct = realized_pct or 0.0
 
-        outcome = None
+        # ---- Phase 1: partial not yet banked ----
+        if not tp1_hit:
+            outcome = exit_price = None
+            if direction == "LONG":
+                if lo <= stop:                 # stop before TP1 -> full loss
+                    outcome, exit_price = "LOSS", stop
+                elif hi >= tp1:                # bank the partial, arm the runner
+                    outcome = "TP1"
+            else:
+                if hi >= stop:
+                    outcome, exit_price = "LOSS", stop
+                elif lo <= tp1:
+                    outcome = "TP1"
+
+            if outcome == "TP1":
+                # Lock in the banked half; move the runner's stop to break-even.
+                banked = round(PARTIAL_FRAC * _leg(entry, tp1, direction), 4)
+                conn.execute(
+                    "UPDATE paper_trades SET tp1_hit=1, realized_pct=?, stop=? WHERE id=?",
+                    (banked, entry, tid),
+                )
+                events.append({
+                    "coin": coin, "direction": direction, "result": "TP1",
+                    "pnl_pct": round(banked, 2), "timeframe": timeframe, "strategy": strategy,
+                })
+                continue
+
+            if outcome is None and _expired(opened_at, timeframe):
+                outcome, exit_price = "EXPIRED", bar["price"]
+
+            if outcome:  # full LOSS or EXPIRED before any partial
+                pnl = round(_leg(entry, exit_price, direction), 2)
+                conn.execute(
+                    "UPDATE paper_trades SET status=?, closed_at=?, exit_price=?, pnl_pct=? WHERE id=?",
+                    (outcome, _now(), exit_price, pnl, tid),
+                )
+                events.append({
+                    "coin": coin, "direction": direction, "result": outcome,
+                    "pnl_pct": pnl, "timeframe": timeframe, "strategy": strategy,
+                })
+            continue
+
+        # ---- Phase 2: runner active (partial already banked, stop = entry) ----
         exit_price = None
-
         if direction == "LONG":
-            if lo <= stop:
-                outcome, exit_price = "LOSS", stop
-            elif hi >= tp1:
-                outcome, exit_price = "WIN", tp1
-        else:  # SHORT
+            if lo <= stop:              # break-even stop
+                exit_price = stop
+            elif hi >= tp2:
+                exit_price = tp2
+        else:
             if hi >= stop:
-                outcome, exit_price = "LOSS", stop
-            elif lo <= tp1:
-                outcome, exit_price = "WIN", tp1
+                exit_price = stop
+            elif lo <= tp2:
+                exit_price = tp2
 
-        # Time-stop: neither target nor stop hit within the hold window ->
-        # close at the current price and mark EXPIRED (kept out of win-rate,
-        # mirroring the backtester which drops these).
-        if outcome is None and _expired(opened_at, timeframe):
-            outcome, exit_price = "EXPIRED", bar["price"]
+        if exit_price is None and _expired(opened_at, timeframe):
+            exit_price = bar["price"]   # time-stop the runner at current price
 
-        if outcome:
-            pnl = (exit_price - entry) / entry * 100.0
-            if direction == "SHORT":
-                pnl = -pnl
-            pnl = round(pnl, 2)
+        if exit_price is not None:
+            total = realized_pct + (1 - PARTIAL_FRAC) * _leg(entry, exit_price, direction)
+            total = round(total, 2)
+            result = "WIN" if total > 0 else "LOSS"
             conn.execute(
                 "UPDATE paper_trades SET status=?, closed_at=?, exit_price=?, pnl_pct=? WHERE id=?",
-                (outcome, _now(), exit_price, pnl, tid),
+                (result, _now(), exit_price, total, tid),
             )
-            closed.append({
-                "coin": coin,
-                "direction": direction,
-                "result": outcome,
-                "pnl_pct": pnl,
-                "timeframe": timeframe,
-                "strategy": strategy,
+            events.append({
+                "coin": coin, "direction": direction, "result": result,
+                "pnl_pct": total, "timeframe": timeframe, "strategy": strategy,
             })
 
     conn.commit()
     conn.close()
-    return closed  # list of closed-trade dicts
+    return events  # partial-bank + full-close events
 
 
 def get_stats():

@@ -124,6 +124,16 @@ USE_TRAIL = False
 TRAIL_ARM_R = 1.0
 TRAIL_DIST_R = 1.5
 
+# Partial-exit mode: bank PARTIAL_FRAC of the position at TP1_R, let the runner
+# go to TP2_R. Optionally move the runner's stop to break-even after TP1. This
+# targets PROFIT-PER-TRADE (bigger avg winner) without adding any entries.
+# Enable with --partial on the command line. Overrides the fixed-TP path below.
+USE_PARTIAL = "--partial" in sys.argv
+PARTIAL_FRAC = 0.5       # fraction banked at TP1
+TP1_R = 2.0              # first target in risk-multiples (banked)
+TP2_R = 4.0             # runner target in risk-multiples
+PARTIAL_MOVE_BE = "--partial-be" in sys.argv   # runner stop -> entry after TP1
+
 
 def simulate(df, i, direction, entry, stop, tp1):
     """Walk forward from bar i+1; return (outcome, exit_price, close_bar) using
@@ -192,6 +202,77 @@ def simulate(df, i, direction, entry, stop, tp1):
     return None, None, None
 
 
+def simulate_partial(df, i, direction, entry, stop):
+    """Partial-exit walk: bank PARTIAL_FRAC at TP1_R, run the rest to TP2_R
+    (optionally moving the runner stop to break-even after TP1).
+
+    Returns (label, pnl_pct_gross, close_bar) where pnl_pct_gross already blends
+    both legs and is signed for the trade direction, or (None, None, None) if
+    the trade never even reached TP1 or its stop (dropped, like the fixed path).
+    """
+    highs = df["high"].to_numpy()
+    lows = df["low"].to_numpy()
+    end = min(len(df), i + 1 + MAX_HOLD)
+    R = abs(entry - stop) or 1e-9
+
+    if direction == "LONG":
+        tp1, tp2 = entry + TP1_R * R, entry + TP2_R * R
+    else:
+        tp1, tp2 = entry - TP1_R * R, entry - TP2_R * R
+
+    def leg(exit_price):
+        """Signed % return of one price level for this trade's direction."""
+        r = (exit_price - entry) / entry * 100.0
+        return -r if direction == "SHORT" else r
+
+    banked = False
+    realized = 0.0
+    run_stop = stop
+
+    for k in range(i + 1, end):
+        hi, lo = highs[k], lows[k]
+        if direction == "LONG":
+            if not banked:
+                if lo <= stop:                      # stop before TP1 -> full loss
+                    return "LOSS", leg(stop), k
+                if hi >= tp1:                       # bank the partial
+                    banked = True
+                    realized += PARTIAL_FRAC * leg(tp1)
+                    if PARTIAL_MOVE_BE:
+                        run_stop = entry
+            else:
+                if lo <= run_stop:
+                    total = realized + (1 - PARTIAL_FRAC) * leg(run_stop)
+                    return ("WIN" if total > 0 else "LOSS"), total, k
+                if hi >= tp2:
+                    total = realized + (1 - PARTIAL_FRAC) * leg(tp2)
+                    return "WIN", total, k
+        else:
+            if not banked:
+                if hi >= stop:
+                    return "LOSS", leg(stop), k
+                if lo <= tp1:
+                    banked = True
+                    realized += PARTIAL_FRAC * leg(tp1)
+                    if PARTIAL_MOVE_BE:
+                        run_stop = entry
+            else:
+                if hi >= run_stop:
+                    total = realized + (1 - PARTIAL_FRAC) * leg(run_stop)
+                    return ("WIN" if total > 0 else "LOSS"), total, k
+                if lo <= tp2:
+                    total = realized + (1 - PARTIAL_FRAC) * leg(tp2)
+                    return "WIN", total, k
+
+    # Ran out of bars. If the partial was banked, close the runner at the last
+    # close and count it; if TP1 was never reached, drop it (like the fixed path).
+    if banked:
+        last_close = float(df["close"].iat[end - 1])
+        total = realized + (1 - PARTIAL_FRAC) * leg(last_close)
+        return ("WIN" if total > 0 else "LOSS"), total, end - 1
+    return None, None, None
+
+
 def backtest_one(coin, timeframe, stats, btc_ctx):
     bars = get_history(coin, timeframe)
     df = pd.DataFrame(
@@ -227,16 +308,23 @@ def backtest_one(coin, timeframe, stats, btc_ctx):
                 sig["price"], sig["direction"], sig["atr"], sig["strategy"],
                 sig.get("stop_level"),
             )
-            outcome, exit_price, close_bar = simulate(
-                df, i, sig["direction"], trade["entry"], trade["stop"], trade["tp1"]
-            )
-            if outcome is None:
-                continue
-
-            pnl = (exit_price - trade["entry"]) / trade["entry"] * 100.0
-            if sig["direction"] == "SHORT":
-                pnl = -pnl
-            pnl -= FEE * 2 * 100  # entry + exit fees
+            if USE_PARTIAL:
+                outcome, pnl, close_bar = simulate_partial(
+                    df, i, sig["direction"], trade["entry"], trade["stop"]
+                )
+                if outcome is None:
+                    continue
+                pnl -= FEE * 2 * 100  # entry + exit fees (approx; partial has an extra exit)
+            else:
+                outcome, exit_price, close_bar = simulate(
+                    df, i, sig["direction"], trade["entry"], trade["stop"], trade["tp1"]
+                )
+                if outcome is None:
+                    continue
+                pnl = (exit_price - trade["entry"]) / trade["entry"] * 100.0
+                if sig["direction"] == "SHORT":
+                    pnl = -pnl
+                pnl -= FEE * 2 * 100  # entry + exit fees
 
             open_until[key] = close_bar
 
@@ -255,8 +343,13 @@ def main():
         coins = MAJORS + ALTS
     else:
         # Mirror live: top coins by market cap available on the exchange.
+        # `--top=N` overrides the default COINS_LIMIT for A/B on universe size.
+        top_n = COINS_LIMIT
+        for a in sys.argv:
+            if a.startswith("--top="):
+                top_n = int(a.split("=", 1)[1])
         try:
-            coins = universe.get_universe(EXCHANGE, 100)[:COINS_LIMIT]
+            coins = universe.get_universe(EXCHANGE, 100)[:top_n]
         except Exception as e:
             print(f"universe unavailable ({type(e).__name__}); using fallback list")
             coins = COINS

@@ -132,7 +132,8 @@ def build():
     # Open-trades table
     if open_t:
         open_rows = "".join(
-            f"<tr><td>{r['coin']}</td><td>{r['strategy'] or '-'}</td><td>{r['timeframe'] or '-'}</td>"
+            f"<tr><td>{r['coin']}{' 🎯' if r['tp1_hit'] else ''}</td>"
+            f"<td>{r['strategy'] or '-'}</td><td>{r['timeframe'] or '-'}</td>"
             f"<td>{_dir_span(r['direction'])}</td>"
             f"<td>{r['score']}%</td><td>{fmt_price(r['entry'])}</td>"
             f"<td>{fmt_price(r['stop'])}</td>"
