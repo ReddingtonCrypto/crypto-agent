@@ -20,6 +20,17 @@ STABLES = {
     "PYUSD", "USDD", "GUSD", "FRAX", "USDS", "USD1",
 }
 
+# Blacklist: coins the per-coin backtest (binanceus, Variant C exits) showed
+# lost CONSISTENTLY — avg < -0.3%/trade over a real sample (>=8 trades). These
+# are excluded from the scan even if their market cap qualifies; the universe
+# backfills from the next coins down. This is the robust use of the screen
+# (dropping proven losers), not the overfit-prone cherry-picking of winners.
+BLACKLIST = {
+    "BNB", "UNI", "NEAR", "ATOM", "HBAR", "SHIB", "POL", "ENA", "HYPE", "SEI",
+    "ALGO", "INJ", "MANA", "OP", "ETC", "QNT", "WLFI", "ONDO", "JUP", "APT",
+    "ASTER",
+}
+
 # Used only if CoinGecko is unreachable and there's no cached list.
 FALLBACK = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
@@ -85,7 +96,7 @@ def get_universe(exchange, limit=100):
 
     pairs = []
     for sym in symbols:
-        if sym in STABLES:
+        if sym in STABLES or sym in BLACKLIST:
             continue
         pair = f"{sym}/USDT"
         m = markets.get(pair)
