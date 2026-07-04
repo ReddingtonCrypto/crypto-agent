@@ -23,7 +23,7 @@ from risk_engine import calculate_trade
 
 # MEXC for the backtest data source: reachable everywhere, prices ~identical to
 # binanceus (the live venue). Switch to ccxt.binanceus if you prefer exact match.
-EXCHANGE = ccxt.mexc({"enableRateLimit": True, "timeout": 30000})
+EXCHANGE = ccxt.binanceus({"enableRateLimit": True, "timeout": 30000})
 
 USE_MARKET_FILTER = True   # apply the live BTC market-bias tilt at each bar
 COINS_LIMIT = 20           # mirror live: top 20 by market cap (alts drag the edge)

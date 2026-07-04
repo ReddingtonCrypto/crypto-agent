@@ -50,14 +50,15 @@ def _rows(conn):
         "SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY score DESC, opened_at DESC"
     ).fetchall()
     closed_t = conn.execute(
-        "SELECT * FROM paper_trades WHERE status IN ('WIN','LOSS') ORDER BY closed_at DESC LIMIT 50"
+        "SELECT * FROM paper_trades WHERE status IN ('WIN','LOSS','EXPIRED') ORDER BY closed_at DESC LIMIT 50"
     ).fetchall()
     wins = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE status='WIN'").fetchone()[0]
     losses = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE status='LOSS'").fetchone()[0]
+    expired = conn.execute("SELECT COUNT(*) FROM paper_trades WHERE status='EXPIRED'").fetchone()[0]
     avg = conn.execute(
         "SELECT AVG(pnl_pct) FROM paper_trades WHERE status IN ('WIN','LOSS')"
     ).fetchone()[0]
-    return open_t, closed_t, wins, losses, avg
+    return open_t, closed_t, wins, losses, expired, avg
 
 
 def _by_strategy(conn):
@@ -103,7 +104,7 @@ def build():
     os.makedirs(OUT_DIR, exist_ok=True)
 
     conn = sqlite3.connect(DB)
-    open_t, closed_t, wins, losses, avg = _rows(conn)
+    open_t, closed_t, wins, losses, expired, avg = _rows(conn)
     strat_rows = _by_strategy(conn)
     conn.close()
 
@@ -150,7 +151,7 @@ def build():
     if closed_t:
         closed_rows = ""
         for r in closed_t:
-            cls = "win" if r["status"] == "WIN" else "loss"
+            cls = "win" if r["status"] == "WIN" else "loss" if r["status"] == "LOSS" else "empty"
             closed_rows += (
                 f"<tr><td>{r['coin']}</td><td>{r['strategy'] or '-'}</td><td>{r['timeframe'] or '-'}</td>"
                 f"<td>{_dir_span(r['direction'])}</td>"
@@ -179,6 +180,7 @@ def build():
         f"<div class='card'><div class='label'>Open</div><div class='value'>{len(open_t)}</div></div>"
         f"<div class='card'><div class='label'>Wins</div><div class='value'>{wins}</div></div>"
         f"<div class='card'><div class='label'>Losses</div><div class='value'>{losses}</div></div>"
+        f"<div class='card'><div class='label'>Expired</div><div class='value'>{expired}</div></div>"
         f"<div class='card'><div class='label'>Avg P&L</div><div class='value'>{avg}%</div></div>"
         "</div>"
         "<h2>Strategy scoreboard</h2>"

@@ -326,8 +326,8 @@ def run_agent():
     # 1) Update existing paper trades; ping Telegram for any that closed.
     closed = paper_trading.update_open_trades(bar_map)
     for t in closed:
-        mark = "WIN" if t["result"] == "WIN" else "LOSS"
-        emoji = "✅" if t["result"] == "WIN" else "❌"
+        mark = t["result"]
+        emoji = {"WIN": "✅", "LOSS": "❌", "EXPIRED": "⌛"}.get(t["result"], "❌")
         tf = t.get("timeframe", "")
         print(f"Trade closed: {t['coin']} {t['direction']} {tf} {mark} {t['pnl_pct']}%")
         asyncio.run(send_alert(
@@ -383,6 +383,7 @@ def run_agent():
         f"\n=== PAPER TRADING SCOREBOARD ===\n"
         f"Open: {stats['open']} | Closed: {stats['closed']} | "
         f"Wins: {stats['wins']} | Losses: {stats['losses']} | "
+        f"Expired: {stats['expired']} | "
         f"Win rate: {stats['win_rate']}% | Avg P&L: {stats['avg_pnl']}%\n"
     )
 

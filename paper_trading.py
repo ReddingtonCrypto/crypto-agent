@@ -9,6 +9,18 @@ from datetime import datetime, timezone
 
 DB = "database/crypto.db"
 
+# Time-stop: a trade that hasn't hit TP1 or its stop within MAX_HOLD_BARS bars
+# of its own timeframe is closed as EXPIRED at the current price. This mirrors
+# the backtester's MAX_HOLD drop so the live scoreboard measures the same thing
+# — without it, meandering trades sit OPEN forever and never resolve, quietly
+# skewing what the dashboard reports.
+MAX_HOLD_BARS = 200
+TF_MINUTES = {
+    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+    "1h": 60, "2h": 120, "4h": 240, "6h": 360, "12h": 720,
+    "1d": 1440, "1w": 10080,
+}
+
 
 def _conn():
     return sqlite3.connect(DB)
@@ -16,6 +28,20 @@ def _conn():
 
 def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _parse(ts):
+    """Parse a stored UTC timestamp string back to an aware datetime."""
+    return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+
+
+def _expired(opened_at, timeframe):
+    """True once a trade has been open longer than MAX_HOLD_BARS of its TF."""
+    if not opened_at:
+        return False
+    minutes = TF_MINUTES.get(timeframe or "1h", 60) * MAX_HOLD_BARS
+    age_min = (datetime.now(timezone.utc) - _parse(opened_at)).total_seconds() / 60.0
+    return age_min >= minutes
 
 
 def has_open_trade(coin, direction, timeframe, strategy):
@@ -54,12 +80,12 @@ def update_open_trades(bars):
     reached TP1, or LOSS if it hit the stop. `price_map` is {coin: price}."""
     conn = _conn()
     rows = conn.execute(
-        "SELECT id, coin, direction, entry, stop, tp1, timeframe, strategy "
+        "SELECT id, coin, direction, entry, stop, tp1, timeframe, strategy, opened_at "
         "FROM paper_trades WHERE status='OPEN'"
     ).fetchall()
 
     closed = []
-    for tid, coin, direction, entry, stop, tp1, timeframe, strategy in rows:
+    for tid, coin, direction, entry, stop, tp1, timeframe, strategy, opened_at in rows:
         bar = bars.get(coin)
         if bar is None or not entry:  # skip missing data or bad (zero) entry
             continue
@@ -82,6 +108,12 @@ def update_open_trades(bars):
                 outcome, exit_price = "LOSS", stop
             elif lo <= tp1:
                 outcome, exit_price = "WIN", tp1
+
+        # Time-stop: neither target nor stop hit within the hold window ->
+        # close at the current price and mark EXPIRED (kept out of win-rate,
+        # mirroring the backtester which drops these).
+        if outcome is None and _expired(opened_at, timeframe):
+            outcome, exit_price = "EXPIRED", bar["price"]
 
         if outcome:
             pnl = (exit_price - entry) / entry * 100.0
@@ -117,6 +149,9 @@ def get_stats():
     losses = conn.execute(
         "SELECT COUNT(*) FROM paper_trades WHERE status='LOSS'"
     ).fetchone()[0]
+    expired = conn.execute(
+        "SELECT COUNT(*) FROM paper_trades WHERE status='EXPIRED'"
+    ).fetchone()[0]
     avg_pnl = conn.execute(
         "SELECT AVG(pnl_pct) FROM paper_trades WHERE status IN ('WIN','LOSS')"
     ).fetchone()[0]
@@ -130,6 +165,7 @@ def get_stats():
         "closed": closed,
         "wins": wins,
         "losses": losses,
+        "expired": expired,
         "win_rate": win_rate,
         "avg_pnl": round(avg_pnl, 2) if avg_pnl is not None else 0.0,
     }
