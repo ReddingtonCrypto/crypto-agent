@@ -75,7 +75,28 @@ def get_history(coin, timeframe):
     if not REFRESH and os.path.exists(path):
         with open(path) as f:
             return json.load(f)
-    bars = EXCHANGE.fetch_ohlcv(coin, timeframe, limit=HISTORY)
+    # Paginate when HISTORY exceeds one page (1000) so we can pull a big enough
+    # sample for a statistically meaningful out-of-sample read.
+    if HISTORY <= 1000:
+        bars = EXCHANGE.fetch_ohlcv(coin, timeframe, limit=HISTORY)
+    else:
+        tf_ms = EXCHANGE.parse_timeframe(timeframe) * 1000
+        since = EXCHANGE.milliseconds() - HISTORY * tf_ms
+        bars = []
+        while len(bars) < HISTORY:
+            batch = EXCHANGE.fetch_ohlcv(coin, timeframe, since=since, limit=1000)
+            if not batch:
+                break
+            bars += batch
+            since = batch[-1][0] + tf_ms
+            if len(batch) < 1000:
+                break
+        # de-dup by timestamp, keep order
+        seen, uniq = set(), []
+        for b in bars:
+            if b[0] not in seen:
+                seen.add(b[0]); uniq.append(b)
+        bars = uniq
     with open(path, "w") as f:
         json.dump(bars, f)
     return bars
@@ -99,7 +120,10 @@ ALTS = [
     "ENA/USDT",
 ]
 TIMEFRAMES = ["1h", "4h"]   # mirror the live bot's timeframes
-HISTORY = 500            # candles to pull per coin/timeframe
+HISTORY = 500            # candles to pull per coin/timeframe (--history=N to override)
+for _a in sys.argv:
+    if _a.startswith("--history="):
+        HISTORY = int(_a.split("=", 1)[1])
 WINDOW = 160             # trailing candles handed to the strategy each bar
 FEE = 0.001              # 0.1% per side modelled on the result
 MAX_HOLD = 200           # give a trade this many bars to resolve, else drop

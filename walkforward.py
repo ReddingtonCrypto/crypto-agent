@@ -34,7 +34,8 @@ import backtest as bt
 from risk_engine import calculate_trade
 
 
-EXCHANGE = ccxt.binanceus({"enableRateLimit": True, "timeout": 30000})
+from data_source import make_exchange
+EXCHANGE = make_exchange()  # binance.com global (the live venue), vision host
 COINS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
     "LINK/USDT", "AVAX/USDT", "DOT/USDT", "BCH/USDT", "XLM/USDT",
