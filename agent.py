@@ -8,6 +8,7 @@ import pandas as pd
 import universe
 import paper_trading
 import health_monitor
+import sector_flow
 from formatting import fmt_price
 from risk_engine import calculate_trade
 from signal_pipeline import save_signal, send_alert, is_new_alert, record_alert
@@ -322,10 +323,15 @@ def run_agent():
 
     coins = universe.get_universe(exchange, limit=100)[:UNIVERSE_SIZE]
     bias = market_bias()
+
+    # Narrative awareness: which sectors is money rotating into right now.
+    heat = sector_flow.sector_heat(exchange)
+    heat_line = "  ".join(f"{h['sector']} {h['avg_pct']:+.1f}%" for h in heat[:4]) or "n/a"
     print(
         f"Watching {len(coins)} coins (top {UNIVERSE_SIZE} by mcap) across "
         f"{len(TIMEFRAMES)} timeframes on {exchange.id}\n"
         f"Market bias (BTC daily): {bias}\n"
+        f"Hot narrative: {heat_line}\n"
     )
 
     signals = []
@@ -477,6 +483,8 @@ Price: {best['price']}
 
     if is_new_alert(signature):
         lines = ["CRYPTO AGENT - TOP SIGNALS\n"]
+        if heat:
+            lines.append(f"Hot narrative: {heat_line}\n")
         for i, s in enumerate(top3, 1):
             tr = calculate_trade(
                 s["price"], s["direction"], s["atr"], s["strategy"], s.get("stop_level")
@@ -485,7 +493,7 @@ Price: {best['price']}
             feats = s.get("smc_features") or []
             feat_line = f"   SMC: {', '.join(feats[:3])}\n" if feats else ""
             lines.append(
-                f"{i}) {s['coin']}  {s['direction']}  {s['confidence']}%\n"
+                f"{i}) {s['coin']}  {s['direction']}  {s['confidence']}%  [{sector_flow.sector_of(s['coin'])}]\n"
                 f"   {s['horizon']} ({s['timeframe']}) - {s['strategy']}\n"
                 f"   Entry {fmt_price(tr['entry'])}\n"
                 f"   Stop  {fmt_price(tr['stop'])}\n"

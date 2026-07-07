@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from formatting import fmt_price
 import health_monitor
+import sector_flow
 
 
 DB = "database/crypto.db"
@@ -112,6 +113,13 @@ def build():
     health = health_monitor.coin_health()
     paused = sorted(c for c, h in health.items() if h["status"] == "PAUSED")
 
+    # Narrative / sector heat (free; may be empty if tickers unavailable).
+    try:
+        import ccxt
+        heat = sector_flow.sector_heat(ccxt.binanceus({"timeout": 20000}))
+    except Exception:
+        heat = []
+
     closed = wins + losses
     win_rate = round(wins / closed * 100, 1) if closed else 0.0
     avg = round(avg, 2) if avg is not None else 0.0
@@ -132,6 +140,21 @@ def build():
         )
     else:
         strat_table = '<div class="empty">No strategy results yet.</div>'
+
+    # Narrative / sector heat table (hottest first)
+    if heat:
+        hrows = "".join(
+            f"<tr><td>{h['sector']}</td><td>{h['coins']}</td>"
+            f"<td class=\"{'win' if h['avg_pct'] >= 0 else 'loss'}\">{h['avg_pct']:+.2f}%</td></tr>"
+            for h in heat
+        )
+        sector_table = (
+            "<div class='sub'>Which narratives money is rotating into (24h avg).</div>"
+            "<table><tr><th>Sector</th><th>Coins</th><th>24h avg</th></tr>"
+            f"{hrows}</table>"
+        )
+    else:
+        sector_table = '<div class="empty">Sector heat unavailable right now.</div>'
 
     # Health monitor: paused coins (recent expectancy decayed) + trailing window
     if paused:
@@ -210,6 +233,8 @@ def build():
         "</div>"
         "<h2>Strategy scoreboard</h2>"
         f"{strat_table}"
+        "<h2>Narrative / sector heat</h2>"
+        f"{sector_table}"
         "<h2>Health monitor</h2>"
         f"{health_table}"
         "<h2>Open trades</h2>"
