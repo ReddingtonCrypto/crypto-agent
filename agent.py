@@ -21,10 +21,11 @@ from strategies.smc.ict_model import detect_ict, detect_mss
 from strategies.smc.orderflow import cvd_proxy, cisd, volume_rising
 from strategies.smc.volume_profile import value_area
 
-exchange = ccxt.binanceus({
-    "enableRateLimit": True,   # space out requests so the exchange doesn't temp-ban us
-    "timeout": 30000,          # 30s per request before giving up
-})
+from data_source import make_exchange
+
+# binance.com (global) via the US-reachable vision data host — the venue we
+# actually trade on — with automatic fallback to binanceus. See data_source.py.
+exchange = make_exchange()
 
 
 # Trade horizons -> the candle timeframe(s) each one scans.
@@ -55,10 +56,12 @@ UNIVERSE_SIZE = 40              # top N by mcap. Widened 20->40: with Variant C 
 
 # Money-flow gate: only take a signal when the coin is in a real volume surge
 # (latest volume >= FLOW_MULT x its 20-bar average) — "trade where money is
-# flowing." Backtest (wide universe): +1.28 -> +1.84/trade, win rate 38.5->43.9%,
-# robust across 2x/3x. Lets us safely scan more coins by only trading hot ones.
+# flowing." The threshold is VENUE-DEPENDENT: binance.com has deep, smooth
+# volume where 2x surges are rare, so 1.3x is the sweet spot here (binance.com
+# backtest: no-gate +1.94 -> 1.3x +2.59/trade, 43 trades). Higher thresholds
+# keep climbing (1.5x +3.30, 2.0x +4.27) but thin the sample — 1.3x keeps trades.
 ENABLE_FLOW = True
-FLOW_MULT = 2.0
+FLOW_MULT = 1.3
 
 # Volume Profile location filter (backtest: +0.36 -> ~+0.50-0.75/trade on majors,
 # +1.54 -> +2.34 on the live universe; robust across 30/50/70 bins). Only take a

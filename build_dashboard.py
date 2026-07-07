@@ -115,8 +115,8 @@ def build():
 
     # Narrative / sector heat (free; may be empty if tickers unavailable).
     try:
-        import ccxt
-        heat = sector_flow.sector_heat(ccxt.binanceus({"timeout": 20000}))
+        from data_source import make_exchange
+        heat = sector_flow.sector_heat(make_exchange())
     except Exception:
         heat = []
 

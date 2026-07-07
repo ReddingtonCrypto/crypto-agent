@@ -55,9 +55,10 @@ for _a in sys.argv:
         agent.VP_BINS = int(_a.split("=", 1)[1])
 
 
-# MEXC for the backtest data source: reachable everywhere, prices ~identical to
-# binanceus (the live venue). Switch to ccxt.binanceus if you prefer exact match.
-EXCHANGE = ccxt.binanceus({"enableRateLimit": True, "timeout": 30000})
+# Same data source as live: binance.com (global) via the vision host, so the
+# backtest measures the exact venue we trade on. Falls back to binanceus.
+from data_source import make_exchange
+EXCHANGE = make_exchange()
 
 USE_MARKET_FILTER = True   # apply the live BTC market-bias tilt at each bar
 COINS_LIMIT = 20           # mirror live: top 20 by market cap (alts drag the edge)
