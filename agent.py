@@ -48,7 +48,16 @@ MAX_OPEN_PER_DIRECTION = 14     # of those, how many may be the same side
 
 ENABLE_TREND = False            # Trend strategy off (backtest: net loser); ICT-focused
 ENABLE_MSS = False              # standalone MSS off (backtest: ~break-even +0.04%); ICT (sweep+MSS+FVG) is the edge
-UNIVERSE_SIZE = 20              # top N by market cap only — alts crush the edge (backtest: majors +0.76 vs +alts +0.02)
+UNIVERSE_SIZE = 40              # top N by mcap. Widened 20->40: with Variant C exits + VP,
+                                # the wide universe backtests POSITIVE (+1.28/trade) — the old
+                                # "alts crush the edge" was a pre-VariantC/pre-VP artifact.
+
+# Money-flow gate: only take a signal when the coin is in a real volume surge
+# (latest volume >= FLOW_MULT x its 20-bar average) — "trade where money is
+# flowing." Backtest (wide universe): +1.28 -> +1.84/trade, win rate 38.5->43.9%,
+# robust across 2x/3x. Lets us safely scan more coins by only trading hot ones.
+ENABLE_FLOW = True
+FLOW_MULT = 2.0
 
 # Volume Profile location filter (backtest: +0.36 -> ~+0.50-0.75/trade on majors,
 # +1.54 -> +2.34 on the live universe; robust across 30/50/70 bins). Only take a
@@ -156,6 +165,7 @@ def evaluate(closed, coin, timeframe, horizon):
 
     vol_sma = latest.VOL_SMA
     vol_confirm = bool(pd.notna(vol_sma) and latest.volume > vol_sma)
+    rel_vol = float(latest.volume / vol_sma) if (pd.notna(vol_sma) and vol_sma > 0) else None
     regime = get_regime(latest.EMA20, latest.EMA50, latest.RSI)
     quality = market_quality(
         latest.volume, closed.volume.mean(), latest.ATR, latest.close
@@ -235,6 +245,7 @@ def evaluate(closed, coin, timeframe, horizon):
             "stop_level": stop_level,
             "cvd": cvd,
             "vp_poc": vp_poc,
+            "rel_vol": rel_vol,
         }
 
     # ----- Trend strategy: DISABLED 2026-06-30 (backtest: net loser). The EMA
@@ -285,6 +296,9 @@ def passes_filters(s):
         return True
 
     if s["strategy"] in ("ICT", "MSS"):
+        # Money-flow gate: only trade coins in a real volume surge.
+        if ENABLE_FLOW and s.get("rel_vol") is not None and s["rel_vol"] < FLOW_MULT:
+            return False
         # Volume Profile location filter: don't chase into the POC — LONG must
         # enter at/below it (discount), SHORT at/above it (premium).
         if ENABLE_VP and s.get("vp_poc") is not None:

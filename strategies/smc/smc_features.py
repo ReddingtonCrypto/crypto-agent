@@ -84,6 +84,27 @@ def fair_value_gap(df, lookback=15):
     return None
 
 
+def fvg_zone(df, lookback=15):
+    """Like fair_value_gap but returns the PRICE LEVELS of the most recent gap,
+    for retracement entries: {"dir", "top", "bottom"} or None.
+
+    Bullish gap = between candle a.high (bottom) and candle c.low (top), with
+    a.high < c.low. Bearish gap = between c.high (bottom) and a.low (top).
+    """
+    highs = df["high"].values
+    lows = df["low"].values
+    n = len(df)
+    for c in range(n - 1, max(n - 1 - lookback, 2) - 1, -1):
+        a = c - 2
+        if a < 0:
+            break
+        if highs[a] < lows[c]:
+            return {"dir": "BULLISH", "bottom": float(highs[a]), "top": float(lows[c])}
+        if lows[a] > highs[c]:
+            return {"dir": "BEARISH", "bottom": float(highs[c]), "top": float(lows[a])}
+    return None
+
+
 def order_block(df, lookback=20):
     body = (df["close"] - df["open"]).abs()
     avg = body.tail(lookback).mean()

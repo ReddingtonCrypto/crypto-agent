@@ -19,6 +19,30 @@ import pandas as pd
 import agent
 import universe
 from risk_engine import calculate_trade
+from strategies.smc.smc_features import fvg_zone
+from strategies.smc.range_rotation import detect_range_rotation
+
+# Range-rotation strategy (--range): FRVP sweep-and-reclaim, tested standalone.
+USE_RANGE = "--range" in sys.argv
+
+# Money-flow gate now lives in agent.passes_filters (mirrors live). A/B from CLI:
+#   --no-flow      : disable the gate.  --flow-mult=N : tune the surge multiple.
+if "--no-flow" in sys.argv:
+    agent.ENABLE_FLOW = False
+for _a in sys.argv:
+    if _a.startswith("--flow-mult="):
+        agent.FLOW_MULT = float(_a.split("=", 1)[1])
+
+# Retracement-entry experiment (--retrace): instead of entering at the breakout
+# CLOSE (chasing), place a limit at the Fair Value Gap the impulse left behind
+# and only fill if price pulls back into it within FILL_WINDOW bars. Better
+# price + tighter stop (just beyond the FVG), but some setups never fill.
+USE_RETRACE = "--retrace" in sys.argv or "--retrace-wide" in sys.argv
+# Hybrid: retracement ENTRY price (better) but keep the WIDE structural stop (the
+# swept level) instead of the tight FVG stop, so big runners still reach 4R.
+RETRACE_WIDE = "--retrace-wide" in sys.argv
+FILL_WINDOW = 5          # bars to wait for price to retrace into the FVG
+RETRACE_STATS = {"fired": 0, "filled": 0}
 
 # The Volume Profile POC filter now lives in agent.passes_filters (so the
 # backtest mirrors live automatically). A/B it from the CLI:
@@ -283,6 +307,59 @@ def simulate_partial(df, i, direction, entry, stop):
     return None, None, None
 
 
+def simulate_partial_levels(df, i, direction, entry, stop, tp1, tp2):
+    """Same partial-exit logic as simulate_partial but with EXPLICIT target
+    levels (tp1=POC, tp2=far edge) instead of R-multiples — for the range
+    strategy. Bank PARTIAL_FRAC at tp1, move the runner to break-even, run to
+    tp2. Returns (label, pnl_pct_gross, close_bar) or (None, None, None)."""
+    highs = df["high"].to_numpy()
+    lows = df["low"].to_numpy()
+    end = min(len(df), i + 1 + MAX_HOLD)
+
+    def leg(x):
+        r = (x - entry) / entry * 100.0
+        return -r if direction == "SHORT" else r
+
+    banked = False
+    realized = 0.0
+    run_stop = stop
+    for k in range(i + 1, end):
+        hi, lo = highs[k], lows[k]
+        if direction == "LONG":
+            if not banked:
+                if lo <= stop:
+                    return "LOSS", leg(stop), k
+                if hi >= tp1:
+                    banked = True
+                    realized += PARTIAL_FRAC * leg(tp1)
+                    if PARTIAL_MOVE_BE:
+                        run_stop = entry
+            else:
+                if lo <= run_stop:
+                    t = realized + (1 - PARTIAL_FRAC) * leg(run_stop)
+                    return ("WIN" if t > 0 else "LOSS"), t, k
+                if hi >= tp2:
+                    t = realized + (1 - PARTIAL_FRAC) * leg(tp2)
+                    return "WIN", t, k
+        else:
+            if not banked:
+                if hi >= stop:
+                    return "LOSS", leg(stop), k
+                if lo <= tp1:
+                    banked = True
+                    realized += PARTIAL_FRAC * leg(tp1)
+                    if PARTIAL_MOVE_BE:
+                        run_stop = entry
+            else:
+                if hi >= run_stop:
+                    t = realized + (1 - PARTIAL_FRAC) * leg(run_stop)
+                    return ("WIN" if t > 0 else "LOSS"), t, k
+                if lo <= tp2:
+                    t = realized + (1 - PARTIAL_FRAC) * leg(tp2)
+                    return "WIN", t, k
+    return None, None, None
+
+
 def backtest_one(coin, timeframe, stats, btc_ctx):
     bars = get_history(coin, timeframe)
     df = pd.DataFrame(
@@ -297,6 +374,32 @@ def backtest_one(coin, timeframe, stats, btc_ctx):
 
     for i in range(60, n - 1):
         window = df.iloc[max(0, i - WINDOW):i + 1]
+
+        # ----- Range-rotation strategy (standalone experiment) -----
+        if USE_RANGE:
+            # --range-regime: only fire when the regime is actually RANGE (the
+            # videos insist the range strategy is regime-specific).
+            gate_ok = True
+            if "--range-regime" in sys.argv:
+                from regime_engine import get_regime
+                last = window.iloc[-1]
+                gate_ok = get_regime(last.EMA20, last.EMA50, last.RSI) == "RANGE"
+            rr = detect_range_rotation(window) if gate_ok else None
+            if rr:
+                key = ("RANGE", rr["direction"])
+                if open_until.get(key, -1) < i:
+                    outcome, pnl, close_bar = simulate_partial_levels(
+                        df, i, rr["direction"], rr["entry"], rr["stop"],
+                        rr["tp1"], rr["tp2"],
+                    )
+                    if outcome is not None:
+                        pnl -= FEE * 2 * 100
+                        open_until[key] = close_bar
+                        s = stats.setdefault("RANGE", {"wins": 0, "losses": 0, "pnl": 0.0})
+                        s["wins" if outcome == "WIN" else "losses"] += 1
+                        s["pnl"] += pnl
+            continue  # range mode replaces ICT for this run
+
         res = agent.evaluate(window, coin, timeframe, "BT")
 
         # Market-bias tilt at this bar's time (same as live), no look-ahead.
@@ -313,6 +416,53 @@ def backtest_one(coin, timeframe, stats, btc_ctx):
             key = (sig["strategy"], sig["direction"])
             if open_until.get(key, -1) >= i:
                 continue  # a trade of this kind is still open
+
+            # ----- Retracement entry (limit at the FVG) -----
+            if USE_RETRACE and sig["strategy"] == "ICT":
+                zone = fvg_zone(window)
+                if zone is None:
+                    continue
+                buf = sig["atr"] * 0.2
+                swept = sig.get("stop_level")
+                if sig["direction"] == "LONG":
+                    entry_lvl = zone["top"]              # first level hit on a pullback
+                    # wide (structural, swept) stop, or tight (just beyond FVG)
+                    stop_lvl = (swept - buf) if (RETRACE_WIDE and swept is not None) \
+                        else (zone["bottom"] - buf)
+                else:
+                    entry_lvl = zone["bottom"]
+                    stop_lvl = (swept + buf) if (RETRACE_WIDE and swept is not None) \
+                        else (zone["top"] + buf)
+                # Stop must sit on the correct side of the entry.
+                if sig["direction"] == "LONG" and stop_lvl >= entry_lvl:
+                    continue
+                if sig["direction"] == "SHORT" and stop_lvl <= entry_lvl:
+                    continue
+
+                RETRACE_STATS["fired"] += 1
+                fill_bar = None
+                for j in range(i + 1, min(n, i + 1 + FILL_WINDOW)):
+                    if sig["direction"] == "LONG" and df["low"].iat[j] <= entry_lvl:
+                        fill_bar = j
+                        break
+                    if sig["direction"] == "SHORT" and df["high"].iat[j] >= entry_lvl:
+                        fill_bar = j
+                        break
+                if fill_bar is None:
+                    continue  # never retraced -> setup missed (not a loss, just no trade)
+                RETRACE_STATS["filled"] += 1
+
+                outcome, pnl, close_bar = simulate_partial(
+                    df, fill_bar, sig["direction"], entry_lvl, stop_lvl
+                )
+                if outcome is None:
+                    continue
+                pnl -= FEE * 2 * 100
+                open_until[key] = close_bar
+                s = stats.setdefault(sig["strategy"], {"wins": 0, "losses": 0, "pnl": 0.0})
+                s["wins" if outcome == "WIN" else "losses"] += 1
+                s["pnl"] += pnl
+                continue
 
             trade = calculate_trade(
                 sig["price"], sig["direction"], sig["atr"], sig["strategy"],
@@ -385,6 +535,12 @@ def main():
         wr = s["wins"] / trades * 100 if trades else 0
         avg = s["pnl"] / trades if trades else 0
         print(f"{strat:<10} {trades:>7} {wr:>7.1f}% {s['pnl']:>8.1f}% {avg:>9.2f}%")
+    if USE_RETRACE:
+        fired = RETRACE_STATS["fired"]
+        filled = RETRACE_STATS["filled"]
+        rate = filled / fired * 100 if fired else 0
+        print(f"\nRetracement entry: {filled}/{fired} setups filled ({rate:.0f}%) "
+              f"-- the rest never pulled back into the FVG (missed).")
     print("======================================")
 
 
