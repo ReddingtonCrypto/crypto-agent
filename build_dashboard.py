@@ -97,6 +97,52 @@ def _by_strategy(conn):
     return rows
 
 
+def _equity_curve(conn):
+    """Cumulative realized P&L (%) over every closed trade, oldest first."""
+    rows = conn.execute(
+        "SELECT pnl_pct FROM paper_trades "
+        "WHERE status IN ('WIN','LOSS','EXPIRED') AND pnl_pct IS NOT NULL "
+        "ORDER BY closed_at ASC"
+    ).fetchall()
+    curve, total = [0.0], 0.0
+    for r in rows:
+        total += r[0]
+        curve.append(round(total, 2))
+    return curve
+
+
+def _equity_svg(curve, width=700, height=180):
+    """Render the cumulative P&L curve as a small inline SVG (no JS needed)."""
+    if len(curve) < 2:
+        return '<div class="empty">Not enough closed trades for a curve yet.</div>'
+    lo, hi = min(curve), max(curve)
+    span = (hi - lo) or 1.0
+    pad = 6
+    n = len(curve) - 1
+    pts = " ".join(
+        f"{pad + i / n * (width - 2 * pad):.1f},"
+        f"{pad + (hi - v) / span * (height - 2 * pad):.1f}"
+        for i, v in enumerate(curve)
+    )
+    # Zero line, if 0 falls inside the plotted range.
+    zero = ""
+    if lo <= 0 <= hi:
+        zy = pad + hi / span * (height - 2 * pad)
+        zero = (f'<line x1="{pad}" y1="{zy:.1f}" x2="{width - pad}" y2="{zy:.1f}" '
+                'stroke="#30363d" stroke-dasharray="4 4"/>')
+    color = "#3fb950" if curve[-1] >= 0 else "#f85149"
+    return (
+        f'<div class="sub">Cumulative realized P&L over all {n} closed trades '
+        f'(incl. expired): <b style="color:{color}">{curve[-1]:+.2f}%</b></div>'
+        f'<svg viewBox="0 0 {width} {height}" '
+        'style="width:100%;height:auto;background:#161b22;'
+        'border:1px solid #30363d;border-radius:10px">'
+        f"{zero}"
+        f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2"/>'
+        "</svg>"
+    )
+
+
 def _dir_span(d):
     cls = "long" if d == "LONG" else "short"
     return f'<span class="{cls}">{d}</span>'
@@ -108,17 +154,20 @@ def build():
     conn = sqlite3.connect(DB)
     open_t, closed_t, wins, losses, expired, avg = _rows(conn)
     strat_rows = _by_strategy(conn)
+    curve = _equity_curve(conn)
     conn.close()
 
     health = health_monitor.coin_health()
     paused = sorted(c for c, h in health.items() if h["status"] == "PAUSED")
 
     # Narrative / sector heat (free; may be empty if tickers unavailable).
+    # Creating the exchange also tells us which data source is live (badge).
+    import data_source
     try:
-        from data_source import make_exchange
-        heat = sector_flow.sector_heat(make_exchange())
+        heat = sector_flow.sector_heat(data_source.make_exchange())
     except Exception:
         heat = []
+    source = data_source.SOURCE_LABEL
 
     closed = wins + losses
     win_rate = round(wins / closed * 100, 1) if closed else 0.0
@@ -222,7 +271,8 @@ def build():
         "<title>Crypto Agent Dashboard</title>"
         f"<style>{CSS}</style></head><body>"
         "<h1>Crypto Agent - Paper Trading</h1>"
-        f"<div class='sub'>Updated {now} - refreshes every 2 min</div>"
+        f"<div class='sub'>Updated {now} - refreshes every 2 min - "
+        f"data: <b>{source}</b></div>"
         "<div class='cards'>"
         f"<div class='card'><div class='label'>Win Rate</div><div class='value'>{win_rate}%</div></div>"
         f"<div class='card'><div class='label'>Open</div><div class='value'>{len(open_t)}</div></div>"
@@ -231,6 +281,8 @@ def build():
         f"<div class='card'><div class='label'>Expired</div><div class='value'>{expired}</div></div>"
         f"<div class='card'><div class='label'>Avg P&L</div><div class='value'>{avg}%</div></div>"
         "</div>"
+        "<h2>Equity curve</h2>"
+        f"{_equity_svg(curve)}"
         "<h2>Strategy scoreboard</h2>"
         f"{strat_table}"
         "<h2>Narrative / sector heat</h2>"

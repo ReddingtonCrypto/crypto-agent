@@ -18,16 +18,23 @@ import ccxt
 
 VISION_PUBLIC = "https://data-api.binance.vision/api/v3"
 
+# Which source the last make_exchange() call ended up on, so the dashboard can
+# show a badge (proves the runner really got binance.com data, not the fallback).
+SOURCE_LABEL = "unknown"
+
 
 def make_exchange():
+    global SOURCE_LABEL
     ex = ccxt.binance({"enableRateLimit": True, "timeout": 30000})
     # Route public market-data through the US-reachable global-data host.
     ex.urls["api"]["public"] = VISION_PUBLIC
     try:
         ex.fetch_ohlcv("BTC/USDT", "1h", limit=1)
         print("Data source: binance.com (global) via data-api.binance.vision")
+        SOURCE_LABEL = "binance.com (global)"
         return ex
     except Exception as e:
         print(f"binance.com vision unreachable ({type(e).__name__}); "
               f"falling back to binanceus.")
+        SOURCE_LABEL = "binanceus (fallback)"
         return ccxt.binanceus({"enableRateLimit": True, "timeout": 30000})
