@@ -1,3 +1,6 @@
-ccxt
-pandas
-python-telegram-bot
+# Pinned so a breaking library release can't silently kill the scheduled scans.
+# To upgrade: bump a version here, test `python backtest.py` + `python scan_once.py`
+# locally, then push.
+ccxt==4.5.64
+pandas==3.0.3
+python-telegram-bot==22.8
