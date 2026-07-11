@@ -14,9 +14,12 @@ falling back to binanceus if the vision host is unreachable, so the bot always
 runs. The scan log prints which source is live.
 """
 
+import time
+
 import ccxt
 
 VISION_PUBLIC = "https://data-api.binance.vision/api/v3"
+PROBE_TRIES = 3
 
 # Which source the last make_exchange() call ended up on, so the dashboard can
 # show a badge (proves the runner really got binance.com data, not the fallback).
@@ -28,13 +31,21 @@ def make_exchange():
     ex = ccxt.binance({"enableRateLimit": True, "timeout": 30000})
     # Route public market-data through the US-reachable global-data host.
     ex.urls["api"]["public"] = VISION_PUBLIC
-    try:
-        ex.fetch_ohlcv("BTC/USDT", "1h", limit=1)
-        print("Data source: binance.com (global) via data-api.binance.vision")
-        SOURCE_LABEL = "binance.com (global)"
-        return ex
-    except Exception as e:
-        print(f"binance.com vision unreachable ({type(e).__name__}); "
-              f"falling back to binanceus.")
-        SOURCE_LABEL = "binanceus (fallback)"
-        return ccxt.binanceus({"enableRateLimit": True, "timeout": 30000})
+    # Retry the probe: a transient timeout must not demote a whole scan to the
+    # fallback venue. If it still fails, carry the reason into the badge so the
+    # dashboard shows WHY (geo-block vs timeout) without digging into logs.
+    err = None
+    for attempt in range(PROBE_TRIES):
+        try:
+            ex.fetch_ohlcv("BTC/USDT", "1h", limit=1)
+            print("Data source: binance.com (global) via data-api.binance.vision")
+            SOURCE_LABEL = "binance.com (global)"
+            return ex
+        except Exception as e:
+            err = e
+            time.sleep(2 * (attempt + 1))
+    reason = f"{type(err).__name__}: {str(err)[:120]}"
+    print(f"binance.com vision unreachable after {PROBE_TRIES} tries ({reason}); "
+          f"falling back to binanceus.")
+    SOURCE_LABEL = f"binanceus (fallback — {reason})"
+    return ccxt.binanceus({"enableRateLimit": True, "timeout": 30000})
