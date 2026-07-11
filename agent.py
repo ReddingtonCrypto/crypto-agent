@@ -513,10 +513,14 @@ Price: {best['price']}
         print("Top-3 unchanged since last alert - logged, no repeat ping")
 
 
-# Loop forever only when run directly (python agent.py) on your own machine.
-# On GitHub Actions we import run_agent() from scan_once.py instead, so this
-# loop must NOT run there.
+# Loop forever only when run directly (python agent.py) — e.g. as a 24/7
+# systemd service on the Oracle VM. On GitHub Actions we import run_agent()
+# from scan_once.py instead, so this loop must NOT run there.
+# Interval is configurable via CRYPTO_SCAN_INTERVAL (seconds); default 900 (15m).
 if __name__ == "__main__":
+    import os
+
+    interval = int(os.environ.get("CRYPTO_SCAN_INTERVAL", "900"))
 
     while True:
 
@@ -526,6 +530,6 @@ if __name__ == "__main__":
         except Exception as e:
             print("Agent error:", e)
 
-        print("\nWaiting 15 minutes...\n")
+        print(f"\nWaiting {interval // 60} minutes...\n", flush=True)
 
-        time.sleep(900)
+        time.sleep(interval)
