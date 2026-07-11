@@ -56,12 +56,13 @@ UNIVERSE_SIZE = 40              # top N by mcap. Widened 20->40: with Variant C 
 
 # Money-flow gate: only take a signal when the coin is in a real volume surge
 # (latest volume >= FLOW_MULT x its 20-bar average) — "trade where money is
-# flowing." The threshold is VENUE-DEPENDENT: binance.com has deep, smooth
-# volume where 2x surges are rare, so 1.3x is the sweet spot here (binance.com
-# backtest: no-gate +1.94 -> 1.3x +2.59/trade, 43 trades). Higher thresholds
-# keep climbing (1.5x +3.30, 2.0x +4.27) but thin the sample — 1.3x keeps trades.
+# flowing." The threshold is VENUE-DEPENDENT: 1.3x was tuned for binance.com's
+# deep smooth volume, but the dashboard badge proved GitHub runners can't reach
+# data-api.binance.vision and always fall back to binanceus, whose thin spiky
+# volume clears 1.3x far too easily (gate too loose). 2.0x is the value that
+# was validated on binanceus data (no-gate +1.28 -> 2x +1.84/trade, robust 2x/3x).
 ENABLE_FLOW = True
-FLOW_MULT = 1.3
+FLOW_MULT = 2.0
 
 # Volume Profile location filter (backtest: +0.36 -> ~+0.50-0.75/trade on majors,
 # +1.54 -> +2.34 on the live universe; robust across 30/50/70 bins). Only take a
