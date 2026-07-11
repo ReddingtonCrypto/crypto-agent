@@ -28,7 +28,15 @@ SOURCE_LABEL = "unknown"
 
 def make_exchange():
     global SOURCE_LABEL
-    ex = ccxt.binance({"enableRateLimit": True, "timeout": 30000})
+    # Spot-only: by default ccxt.binance also loads FUTURES markets from
+    # fapi.binance.com, which is geo-blocked (451) from US IPs like GitHub's
+    # runners — that call was killing the probe even though the spot data host
+    # is reachable. We never trade futures, so don't fetch them at all.
+    ex = ccxt.binance({
+        "enableRateLimit": True,
+        "timeout": 30000,
+        "options": {"defaultType": "spot", "fetchMarkets": ["spot"]},
+    })
     # Route public market-data through the US-reachable global-data host.
     ex.urls["api"]["public"] = VISION_PUBLIC
     # Retry the probe: a transient timeout must not demote a whole scan to the
