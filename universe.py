@@ -14,10 +14,13 @@ import urllib.request
 CACHE_FILE = "data/universe.json"
 CACHE_TTL = 24 * 3600  # refresh the list once a day
 
-# Stablecoins / pegged tokens we don't want to scan as "/USDT".
+# Pegged / non-trending tokens we don't want to scan as "/USDT": USD stablecoins
+# plus gold-backed tokens (XAUT/PAXG) — liquid but they barely move, so ICT
+# structure signals never form.
 STABLES = {
     "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "BUSD",
-    "PYUSD", "USDD", "GUSD", "FRAX", "USDS", "USD1",
+    "PYUSD", "USDD", "GUSD", "FRAX", "USDS", "USD1", "RLUSD", "BFUSD",
+    "XAUT", "PAXG",
 }
 
 # Blacklist: coins the per-coin backtest (binanceus, Variant C exits) showed
