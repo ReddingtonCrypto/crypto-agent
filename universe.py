@@ -79,14 +79,20 @@ def get_universe(exchange, limit=100):
     (exchange-independent); the intersection is recomputed for whichever
     exchange is passed in, so switching exchanges Just Works."""
 
+    # CoinGecko's top-N by mcap is padded with wrapped/staked tokens and
+    # stablecoins that aren't Binance spot USDT pairs, so the tradeable
+    # intersection is much smaller than N. Over-fetch (up to 250) so we can
+    # actually reach `limit` real pairs after filtering.
+    raw_needed = min(250, max(limit * 3, 100))
     symbols = _read_symbols_cache()
-    if symbols is None:
+    if symbols is None or len(symbols) < raw_needed:
         try:
-            symbols = _coingecko_top(limit)
+            symbols = _coingecko_top(raw_needed)
             _save_symbols_cache(symbols)
         except Exception as e:
             print(f"CoinGecko unavailable ({type(e).__name__}); using fallback list.")
-            symbols = [p.split("/")[0] for p in FALLBACK]
+            if symbols is None:
+                symbols = [p.split("/")[0] for p in FALLBACK]
 
     try:
         markets = exchange.load_markets()
@@ -103,4 +109,4 @@ def get_universe(exchange, limit=100):
         if m and m.get("spot") and m.get("active", True):
             pairs.append(pair)
 
-    return pairs or FALLBACK
+    return (pairs or FALLBACK)[:limit]
