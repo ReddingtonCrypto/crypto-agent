@@ -59,6 +59,9 @@ tr:nth-child(even) td { background: #0e131a; }
 .pill { display:inline-block; padding:1px 7px; border-radius:20px; font-size:11px; font-weight:700; }
 .pill.ok { background:#132b1a; color:#3fb950; }
 .pill.bad { background:#2b1414; color:#f85149; }
+.status { padding:11px 14px; border-radius:10px; font-size:13px; font-weight:600; margin:12px 0; }
+.status.ok { background:#0f2417; color:#3fb950; border:1px solid #1f6f3d; }
+.status.bad { background:#2b1414; color:#f85149; border:1px solid #6f1f1f; }
 """
 
 
@@ -203,37 +206,22 @@ def _dir_span(d):
     return f'<span class="{cls}">{d}</span>'
 
 
-def _run_health_html():
-    """Show whether recent scan cycles succeeded — so a broken bot is obvious
-    instead of just a silently stale dashboard."""
+def _system_status_html():
+    """One clear line: green if the bot is running smoothly, red only if the
+    last scan failed and needs manual attention (you're also pinged on Telegram)."""
     import run_health
     rh = run_health.load()
     if not rh or not rh.get("last"):
-        return '<div class="empty">No scan recorded yet (starts after the first run).</div>'
-
+        return "<div class='status ok'>⏳ Starting up — waiting for the first scan…</div>"
     last = rh["last"]
-    ok = last["status"] == "ok"
-    cls = "win" if ok else "loss"
-    label = "OK" if ok else "ERROR"
-    extra = f" — {last['error']}" if (not ok and last.get("error")) else ""
-
-    rows = ""
-    for e in reversed(rh.get("history", [])[-10:]):
-        c = "win" if e["status"] == "ok" else "loss"
-        if e["status"] == "ok":
-            info = f"open {e.get('open', '-')}, closed {e.get('closed', '-')}, win {e.get('win_rate', '-')}%"
-        else:
-            info = e.get("error", "")
-        rows += (
-            f"<tr><td>{e['time']}</td>"
-            f"<td class='{c}'>{e['status'].upper()}</td><td>{info}</td></tr>"
+    if last["status"] == "ok":
+        return (
+            "<div class='status ok'>✅ Running smoothly — everything is working. "
+            f"Last scan {last['time']} (scans every 5 min).</div>"
         )
-
     return (
-        f"<div class='sub'>Last scan: {last['time']} — <b class='{cls}'>{label}</b>{extra} "
-        "(scans every 5 min)</div>"
-        "<table><tr><th>Time (UTC)</th><th>Status</th><th>Details</th></tr>"
-        f"{rows}</table>"
+        "<div class='status bad'>⚠️ PROBLEM — the last scan failed and needs your attention "
+        f"(you've also been alerted on Telegram).<br>{last['time']} — {last.get('error', '')}</div>"
     )
 
 
@@ -245,6 +233,7 @@ def build():
     strat_rows = _by_strategy(conn)
     curve = _equity_curve(conn)
     long_curve = _equity_curve(conn, "LONG")
+    short_curve = _equity_curve(conn, "SHORT")
     by_dir = _by_direction(conn)
     conn.close()
 
@@ -316,27 +305,25 @@ def build():
             f"(watching the last {health_monitor.HEALTH_WINDOW_DAYS} days).</div>"
         )
 
-    # Open-trades tables, split by side (longs are what you actually trade).
-    def _open_table(rows):
-        if not rows:
-            return '<div class="empty">None open right now.</div>'
-        body = "".join(
+    # Open-trades table, all directions (longs listed first).
+    if open_t:
+        ordered = sorted(open_t, key=lambda r: 0 if r["direction"] == "LONG" else 1)
+        open_rows = "".join(
             f"<tr><td>{r['coin']}{' 🎯' if r['tp1_hit'] else ''}</td>"
+            f"<td>{_dir_span(r['direction'])}</td>"
             f"<td>{r['strategy'] or '-'}</td><td>{r['timeframe'] or '-'}</td>"
             f"<td>{r['score']}%</td><td>{fmt_price(r['entry'])}</td>"
             f"<td>{fmt_price(r['stop'])}</td>"
             f"<td>{fmt_price(r['tp1'])}</td><td>{r['opened_at']}</td></tr>"
-            for r in rows
+            for r in ordered
         )
-        return (
-            "<table><tr><th>Coin</th><th>Strat</th><th>TF</th><th>Conf</th><th>Entry</th>"
-            "<th>Stop</th><th>TP1</th><th>Opened (UTC)</th></tr>"
-            f"{body}</table>"
+        open_table = (
+            "<table><tr><th>Coin</th><th>Dir</th><th>Strat</th><th>TF</th><th>Conf</th>"
+            "<th>Entry</th><th>Stop</th><th>TP1</th><th>Opened (UTC)</th></tr>"
+            f"{open_rows}</table>"
         )
-    open_long = [r for r in open_t if r["direction"] == "LONG"]
-    open_short = [r for r in open_t if r["direction"] == "SHORT"]
-    open_long_table = _open_table(open_long)
-    open_short_table = _open_table(open_short)
+    else:
+        open_table = '<div class="empty">No open trades right now.</div>'
 
     # Closed-trades table
     if closed_t:
@@ -358,37 +345,27 @@ def build():
     else:
         closed_table = '<div class="empty">No closed trades yet - they resolve as price hits target or stop.</div>'
 
-    # LONG panel cards (what you actually trade)
-    lg = by_dir["LONG"]
-    lg_avg_cls = "win" if lg["avg_pnl"] >= 0 else "loss"
-    lg_tot_cls = "win" if lg["total_pnl"] >= 0 else "loss"
-
-    # Direction-breakdown table (LONG vs SHORT)
-    def _dir_row(d):
-        s = by_dir[d]
-        acls = "win" if s["avg_pnl"] >= 0 else "loss"
-        tcls = "win" if s["total_pnl"] >= 0 else "loss"
+    # Direction P&L panel (reused for LONG and SHORT).
+    def _dir_panel(title, emoji, stats, curve_svg, accent=False):
+        avg_cls = "win" if stats["avg_pnl"] >= 0 else "loss"
+        tot_cls = "win" if stats["total_pnl"] >= 0 else "loss"
+        acls = " accent" if accent else ""
         return (
-            f"<tr><td>{_dir_span(d)}</td><td>{s['open']}</td><td>{s['closed']}</td>"
-            f"<td>{s['win_rate']}%</td>"
-            f"<td class='{acls}'>{s['avg_pnl']:+}%</td>"
-            f"<td class='{tcls}'>{s['total_pnl']:+}%</td></tr>"
+            f"<div class='panel{acls}'>"
+            f"<h2>{emoji} {title}</h2>"
+            "<div class='cards'>"
+            f"<div class='card'><div class='label'>Win Rate</div><div class='value'>{stats['win_rate']}%</div></div>"
+            f"<div class='card'><div class='label'>Open</div><div class='value'>{stats['open']}</div></div>"
+            f"<div class='card'><div class='label'>Closed</div><div class='value'>{stats['closed']}</div></div>"
+            f"<div class='card'><div class='label'>Avg P&L</div><div class='value {avg_cls}'>{stats['avg_pnl']:+}%</div></div>"
+            f"<div class='card'><div class='label'>Total P&L</div><div class='value {tot_cls}'>{stats['total_pnl']:+}%</div></div>"
+            "</div>"
+            f"<div style='margin-top:12px'>{curve_svg}</div>"
+            "</div>"
         )
-    dir_table = (
-        "<table><tr><th>Direction</th><th>Open</th><th>Closed</th><th>Win rate</th>"
-        "<th>Avg P&L</th><th>Total P&L</th></tr>"
-        f"{_dir_row('LONG')}{_dir_row('SHORT')}</table>"
-    )
 
-    # Run-health one-liner for the header
-    import run_health
-    rh = run_health.load()
-    if rh and rh.get("last"):
-        _ok = rh["last"]["status"] == "ok"
-        health_pill = f"<span class='pill {'ok' if _ok else 'bad'}'>{'OK' if _ok else 'ERROR'}</span>"
-        health_hdr = f" · last scan {rh['last']['time'][11:16]} UTC {health_pill}"
-    else:
-        health_hdr = ""
+    long_panel = _dir_panel("Longs P&L", "📈", by_dir["LONG"], _equity_svg(long_curve), accent=True)
+    short_panel = _dir_panel("Shorts P&L", "📉", by_dir["SHORT"], _equity_svg(short_curve))
 
     html = (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
@@ -397,62 +374,43 @@ def build():
         "<title>Crypto Agent Dashboard</title>"
         f"<style>{CSS}</style></head><body>"
         "<h1>Crypto Agent — Paper Trading</h1>"
-        f"<div class='sub'>Updated {now} · data: <b>{source}</b>{health_hdr}</div>"
+        f"<div class='sub'>Updated {now} · data: <b>{source}</b></div>"
 
-        # ---- LONG panel: the trades you actually take ----
-        "<div class='panel accent'>"
-        "<h2>📈 Longs only <span class='tag'>— what you actually trade (spot buys)</span></h2>"
-        "<div class='cards'>"
-        f"<div class='card'><div class='label'>Win Rate</div><div class='value'>{lg['win_rate']}%</div></div>"
-        f"<div class='card'><div class='label'>Open</div><div class='value'>{lg['open']}</div></div>"
-        f"<div class='card'><div class='label'>Closed</div><div class='value'>{lg['closed']}</div></div>"
-        f"<div class='card'><div class='label'>Avg P&L</div><div class='value {lg_avg_cls}'>{lg['avg_pnl']:+}%</div></div>"
-        f"<div class='card'><div class='label'>Total P&L</div><div class='value {lg_tot_cls}'>{lg['total_pnl']:+}%</div></div>"
-        "</div>"
-        f"<div style='margin-top:12px'>{_equity_svg(long_curve)}</div>"
-        "</div>"
+        # ---- System status (green = smooth, red = needs you) ----
+        f"{_system_status_html()}"
 
-        # ---- All-directions reference ----
+        # ---- Narrative / sector heat ----
         "<div class='panel'>"
-        "<h2>All directions <span class='tag'>— reference (includes shorts the bot won't act on)</span></h2>"
-        "<div class='cards'>"
-        f"<div class='card'><div class='label'>Win Rate</div><div class='value'>{win_rate}%</div></div>"
-        f"<div class='card'><div class='label'>Open</div><div class='value'>{len(open_t)}</div></div>"
-        f"<div class='card'><div class='label'>Wins</div><div class='value'>{wins}</div></div>"
-        f"<div class='card'><div class='label'>Losses</div><div class='value'>{losses}</div></div>"
-        f"<div class='card'><div class='label'>Expired</div><div class='value'>{expired}</div></div>"
-        f"<div class='card'><div class='label'>Avg P&L</div><div class='value'>{avg}%</div></div>"
-        "</div>"
-        f"<div style='margin-top:12px'>{dir_table}</div>"
-        f"<div style='margin-top:12px'>{_equity_svg(curve)}</div>"
-        "</div>"
-
-        # ---- Open trades, split by side ----
-        "<div class='panel'>"
-        f"<h2>Open LONG trades <span class='tag'>({len(open_long)})</span></h2>"
-        f"{open_long_table}"
-        f"<h2 style='margin-top:16px'>Open SHORT trades <span class='tag'>({len(open_short)}) — not acted on</span></h2>"
-        f"{open_short_table}"
-        "</div>"
-
-        # ---- Recent results ----
-        "<div class='panel'>"
-        "<h2>Recent results</h2>"
-        f"{closed_table}"
-        "</div>"
-
-        # ---- Diagnostics: run health, strategy, sector, coin health ----
-        "<div class='panel'>"
-        "<h2>Run health <span class='tag'>— did each scan succeed</span></h2>"
-        f"{_run_health_html()}"
-        "</div>"
-        "<div class='panel'>"
-        "<h2>Strategy scoreboard</h2>"
-        f"{strat_table}"
-        "<h2 style='margin-top:16px'>Narrative / sector heat</h2>"
+        "<h2>Narrative / sector heat</h2>"
         f"{sector_table}"
-        "<h2 style='margin-top:16px'>Coin health monitor</h2>"
+        "</div>"
+
+        # ---- Open trades (all directions) ----
+        "<div class='panel'>"
+        f"<h2>Open trades ({len(open_t)})</h2>"
+        f"{open_table}"
+        "</div>"
+
+        # ---- Strategy scoreboard (with P&L) ----
+        "<div class='panel'>"
+        "<h2>Strategies</h2>"
+        f"{strat_table}"
+        "</div>"
+
+        # ---- Longs then Shorts P&L ----
+        f"{long_panel}"
+        f"{short_panel}"
+
+        # ---- Coin health monitor ----
+        "<div class='panel'>"
+        "<h2>Coin health monitor</h2>"
         f"{health_table}"
+        "</div>"
+
+        # ---- Trade history (at the end) ----
+        "<div class='panel'>"
+        "<h2>Trade history</h2>"
+        f"{closed_table}"
         "</div>"
         "</body></html>"
     )
