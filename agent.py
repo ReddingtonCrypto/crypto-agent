@@ -56,10 +56,12 @@ MAX_OPEN_PER_DIRECTION = 14     # of those, how many may be the same side
 
 ENABLE_TREND = False            # old EMA Trend strategy off (backtest: net loser)
 ENABLE_MSS = False              # standalone MSS off (backtest: ~break-even +0.04%); ICT (sweep+MSS+FVG) is the edge
-# Trend-following (dualcross 20/100 SMA) — strategy-lab winner: beat buy-hold
-# risk-adjusted (Sharpe 1.24, -37% DD) and survived the walk-forward. LONG while
-# fast MA > slow MA; exits on the trend flip (in paper_trading), not a fixed TP.
+# Trend-following (dualcross 20/100 SMA) — strategy-lab winner. Multi-TF
+# validation (36-44 coins): works on 4h/12h/1d (beats buy-hold RISK-ADJUSTED,
+# recent-half positive), but FAILS on 1h/30m (too noisy for a 20/100 cross). So
+# only fire TrendMA on the higher timeframes where it's validated.
 ENABLE_TREND_MA = True
+TREND_MA_TFS = {"4h", "12h", "1d"}
 UNIVERSE_SIZE = 40              # top N by mcap. Widened 20->40: with Variant C exits + VP,
                                 # the wide universe backtests POSITIVE (+1.28/trade) — the old
                                 # "alts crush the edge" was a pre-VariantC/pre-VP artifact.
@@ -295,7 +297,7 @@ def evaluate(closed, coin, timeframe, horizon):
     ma_up = bool(pd.notna(latest.SMA_FAST) and pd.notna(latest.SMA_SLOW)
                  and latest.SMA_FAST > latest.SMA_SLOW)
     result["ma_uptrend"] = ma_up
-    if ENABLE_TREND_MA and ma_up:
+    if ENABLE_TREND_MA and ma_up and timeframe in TREND_MA_TFS:
         result["signals"].append(make("TrendMA", "LONG", 80))
 
     return result
