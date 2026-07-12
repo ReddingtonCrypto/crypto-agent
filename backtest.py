@@ -125,6 +125,9 @@ HISTORY = 500            # candles to pull per coin/timeframe (--history=N to ov
 for _a in sys.argv:
     if _a.startswith("--history="):
         HISTORY = int(_a.split("=", 1)[1])
+    # --tf=30m or --tf=1h,4h,12h : test which timeframes' signals help/hurt.
+    if _a.startswith("--tf="):
+        TIMEFRAMES = _a.split("=", 1)[1].split(",")
 WINDOW = 160             # trailing candles handed to the strategy each bar
 FEE = 0.001              # 0.1% per side modelled on the result
 MAX_HOLD = 200           # give a trade this many bars to resolve, else drop
