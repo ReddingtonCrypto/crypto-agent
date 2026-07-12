@@ -573,6 +573,26 @@ def backtest_one(coin, timeframe, stats, btc_ctx):
             s["pnl"] += pnl
 
 
+def _run_coin(args):
+    """Run all timeframes for one coin into a fresh stats dict (for the pool)."""
+    coin, btc_ctx = args
+    local = {}
+    for tf in TIMEFRAMES:
+        try:
+            backtest_one(coin, tf, local, btc_ctx)
+        except Exception as e:
+            print(f"  skip {coin} {tf}: {type(e).__name__}: {e}")
+    return local
+
+
+def _merge_stats(dst, src):
+    for k, v in src.items():
+        d = dst.setdefault(k, {"wins": 0, "losses": 0, "pnl": 0.0})
+        d["wins"] += v["wins"]
+        d["losses"] += v["losses"]
+        d["pnl"] += v["pnl"]
+
+
 def main():
     if "--majors" in sys.argv:
         coins = MAJORS
@@ -595,12 +615,20 @@ def main():
     btc_ctx = BTCContext() if USE_MARKET_FILTER else None
 
     stats = {}
-    for coin in coins:
-        for tf in TIMEFRAMES:
-            try:
-                backtest_one(coin, tf, stats, btc_ctx)
-            except Exception as e:
-                print(f"  skip {coin} {tf}: {type(e).__name__}: {e}")
+    # Parallelise across coins — the per-bar strategy eval is the bottleneck, so
+    # spreading coins over cores gives a near-linear speedup. --jobs=1 to disable.
+    jobs = min(4, len(coins))
+    for a in sys.argv:
+        if a.startswith("--jobs="):
+            jobs = int(a.split("=", 1)[1])
+    if jobs > 1 and len(coins) > 1:
+        import multiprocessing as mp
+        with mp.Pool(jobs) as pool:
+            for local in pool.imap_unordered(_run_coin, [(c, btc_ctx) for c in coins]):
+                _merge_stats(stats, local)
+    else:
+        for coin in coins:
+            _merge_stats(stats, _run_coin((coin, btc_ctx)))
 
     print("\n========== BACKTEST RESULTS ==========")
     print(f"Coins: {len(coins)} | Timeframes: {TIMEFRAMES} | market filter: {USE_MARKET_FILTER}")
