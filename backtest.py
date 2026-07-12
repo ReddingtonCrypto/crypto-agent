@@ -37,11 +37,17 @@ REVERSAL_EXIT = "--reversal-exit" in sys.argv
 #   structural-stop outliers, e.g. the live XLM -12.6% loss).
 CONF_MAX = None
 MAX_STOP_PCT = None
+# --split=first / --split=last : walk-forward — run only the first or last half
+# of each coin's history, so we can check an edge holds out-of-sample (early
+# regime vs later unseen regime), not just in aggregate.
+SPLIT = None
 for _a in sys.argv:
     if _a.startswith("--conf-max="):
         CONF_MAX = float(_a.split("=", 1)[1])
     if _a.startswith("--max-stop="):
         MAX_STOP_PCT = float(_a.split("=", 1)[1])
+    if _a.startswith("--split="):
+        SPLIT = _a.split("=", 1)[1]
 
 # Money-flow gate now lives in agent.passes_filters (mirrors live). A/B from CLI:
 #   --no-flow      : disable the gate.  --flow-mult=N : tune the surge multiple.
@@ -427,6 +433,11 @@ def backtest_one(coin, timeframe, stats, btc_ctx):
     # --history actually controls run time (and sample size) on cached data.
     if len(bars) > HISTORY:
         bars = bars[-HISTORY:]
+    # Walk-forward split: first vs last half of history (out-of-sample check).
+    if SPLIT == "first":
+        bars = bars[: len(bars) // 2]
+    elif SPLIT == "last":
+        bars = bars[len(bars) // 2:]
     df = pd.DataFrame(
         bars, columns=["timestamp", "open", "high", "low", "close", "volume"]
     )
