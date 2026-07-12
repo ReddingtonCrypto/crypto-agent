@@ -423,6 +423,10 @@ def simulate_partial_levels(df, i, direction, entry, stop, tp1, tp2):
 
 def backtest_one(coin, timeframe, stats, btc_ctx):
     bars = get_history(coin, timeframe)
+    # Cap the simulated window to HISTORY even when the cache holds more, so
+    # --history actually controls run time (and sample size) on cached data.
+    if len(bars) > HISTORY:
+        bars = bars[-HISTORY:]
     df = pd.DataFrame(
         bars, columns=["timestamp", "open", "high", "low", "close", "volume"]
     )
