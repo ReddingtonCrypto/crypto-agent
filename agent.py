@@ -54,8 +54,12 @@ CONFIRM_TF = {
 MAX_OPEN_TRADES = 20            # total positions open at once
 MAX_OPEN_PER_DIRECTION = 14     # of those, how many may be the same side
 
-ENABLE_TREND = False            # Trend strategy off (backtest: net loser); ICT-focused
+ENABLE_TREND = False            # old EMA Trend strategy off (backtest: net loser)
 ENABLE_MSS = False              # standalone MSS off (backtest: ~break-even +0.04%); ICT (sweep+MSS+FVG) is the edge
+# Trend-following (dualcross 20/100 SMA) — strategy-lab winner: beat buy-hold
+# risk-adjusted (Sharpe 1.24, -37% DD) and survived the walk-forward. LONG while
+# fast MA > slow MA; exits on the trend flip (in paper_trading), not a fixed TP.
+ENABLE_TREND_MA = True
 UNIVERSE_SIZE = 40              # top N by mcap. Widened 20->40: with Variant C exits + VP,
                                 # the wide universe backtests POSITIVE (+1.28/trade) — the old
                                 # "alts crush the edge" was a pre-VariantC/pre-VP artifact.
@@ -135,6 +139,10 @@ def add_indicators(df):
 
     df["ATR"] = (df.high - df.low).rolling(14).mean()
     df["VOL_SMA"] = df.volume.rolling(20).mean()
+
+    # Trend-following MAs (dualcross 20/100) — the strategy-lab winner.
+    df["SMA_FAST"] = df.close.rolling(20).mean()
+    df["SMA_SLOW"] = df.close.rolling(100).mean()
     return df
 
 
@@ -283,11 +291,23 @@ def evaluate(closed, coin, timeframe, horizon):
                 make("MSS", mss["direction"], 80, stop_level=mss["swept"])
             )
 
+    # ----- Trend-following (dualcross 20/100 SMA) — LONG while uptrend -----
+    ma_up = bool(pd.notna(latest.SMA_FAST) and pd.notna(latest.SMA_SLOW)
+                 and latest.SMA_FAST > latest.SMA_SLOW)
+    result["ma_uptrend"] = ma_up
+    if ENABLE_TREND_MA and ma_up:
+        result["signals"].append(make("TrendMA", "LONG", 80))
+
     return result
 
 
 def passes_filters(s):
     """The rules that decide whether a coin is a tradeable signal."""
+    # Trend-following: the MA trend IS the signal; skip the ICT-oriented filters
+    # (VP/flow/volume-surge don't apply). Exit is the trend flip, not a TP.
+    if s["strategy"] == "TrendMA":
+        return True
+
     # Common requirements for both strategies.
     if s["confidence"] < 70:
         return False
@@ -352,6 +372,7 @@ def run_agent():
 
     signals = []
     bar_map = {}
+    trend_flipped = set()   # (coin, tf) where the MA trend turned down -> exit TrendMA
     for coin in coins:
         # Analyse every timeframe for this coin first (so we have the
         # confirmation timeframe's direction on hand).
@@ -366,6 +387,8 @@ def run_agent():
                     bar_map.setdefault(coin, {
                         "high": r["high"], "low": r["low"], "price": r["price"],
                     })
+                    if not r.get("ma_uptrend", True):
+                        trend_flipped.add((coin, tf))
             except Exception as e:
                 print(f"Error scanning {coin} {tf}: {type(e).__name__}: {e}")
 
@@ -389,7 +412,7 @@ def run_agent():
 
     # 1) Advance paper trades (partial-exit plan); ping Telegram for each event
     #    — a partial bank at TP1, or a full close (WIN/LOSS/EXPIRED).
-    for t in paper_trading.update_open_trades(bar_map):
+    for t in paper_trading.update_open_trades(bar_map, trend_flipped):
         mark = t["result"]
         emoji = {"WIN": "✅", "LOSS": "❌", "EXPIRED": "⌛", "TP1": "🎯"}.get(mark, "❌")
         tf = t.get("timeframe", "")

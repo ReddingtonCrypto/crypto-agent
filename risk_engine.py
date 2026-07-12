@@ -37,7 +37,11 @@ def calculate_trade(price, direction, atr, strategy="Trend", stop_level=None):
         # risk came out non-positive -> fall back to ATR sizing below.
 
     # ----- ATR-based stop (Trend / Range, or ICT fallback) -----
-    if strategy == "Range":
+    if strategy == "TrendMA":
+        # Trend-following: a WIDE catastrophic stop only — the real exit is the
+        # MA trend-flip (handled in paper_trading), so let winners run far.
+        s_mult, t1_mult, t2_mult = 4.0, 20.0, 40.0
+    elif strategy == "Range":
         s_mult, t1_mult, t2_mult = 1.5, 1.5, 3.0
     elif strategy == "ICT":
         # Keep TP1=2R, TP2=4R off the ATR stop (R = 1.5*ATR) to match the

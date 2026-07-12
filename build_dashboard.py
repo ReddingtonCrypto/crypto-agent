@@ -460,9 +460,11 @@ def build():
         f"{long_panel}{short_panel}"
         "</div>"
 
-        # 3) Trade-type breakdown (which styles work)
+        # 3) Strategy scoreboard (ICT vs TrendMA vs …) + trade-type breakdown
         "<div class='panel'>"
-        "<h2>By trade type</h2>"
+        "<h2>Strategies</h2>"
+        f"{strat_table}"
+        "<h2 style='margin-top:16px'>By trade type</h2>"
         f"{type_table}"
         "</div>"
 

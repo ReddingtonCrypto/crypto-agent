@@ -84,7 +84,7 @@ def _leg(entry, exit_price, direction):
     return -r if direction == "SHORT" else r
 
 
-def update_open_trades(bars):
+def update_open_trades(bars, trend_flipped=None):
     """Advance every open trade against the latest candle, running the backtested
     partial-exit plan (Variant C):
 
@@ -111,6 +111,30 @@ def update_open_trades(bars):
         # Intraday high/low so we don't miss a level hit then retraced.
         hi, lo = bar["high"], bar["low"]
         realized_pct = realized_pct or 0.0
+
+        # ---- Trend-following: exit on trend flip or the wide catastrophic stop
+        #      (no Variant C partials — let the trend run). ----
+        if strategy == "TrendMA":
+            flipped = trend_flipped and (coin, timeframe) in trend_flipped
+            exit_price = None
+            if direction == "LONG" and lo <= stop:
+                exit_price = stop
+            elif direction == "SHORT" and hi >= stop:
+                exit_price = stop
+            elif flipped:
+                exit_price = bar["price"]
+            if exit_price is not None:
+                pnl = round(_leg(entry, exit_price, direction), 2)
+                result = "WIN" if pnl > 0 else "LOSS"
+                conn.execute(
+                    "UPDATE paper_trades SET status=?, closed_at=?, exit_price=?, pnl_pct=? WHERE id=?",
+                    (result, _now(), exit_price, pnl, tid),
+                )
+                events.append({
+                    "coin": coin, "direction": direction, "result": result,
+                    "pnl_pct": pnl, "timeframe": timeframe, "strategy": strategy,
+                })
+            continue
 
         # ---- Phase 1: partial not yet banked ----
         if not tp1_hit:
