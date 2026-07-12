@@ -346,6 +346,47 @@ def passes_filters(s):
     return False
 
 
+# Plain-English translations of the SMC reasoning tags, so an alert reads like a
+# sentence instead of shorthand.
+PLAIN_TERMS = {
+    # structure
+    "BOS BULLISH": "uptrend continuing (broke above recent high)",
+    "BOS BEARISH": "downtrend continuing (broke below recent low)",
+    "CHoCH BULLISH": "may be turning up (first higher high)",
+    "CHoCH BEARISH": "may be turning down (first lower low)",
+    # sweeps / liquidity
+    "Sell-side sweep": "dipped to grab stops below, then bounced",
+    "Buy-side sweep": "spiked to grab stops above, then dropped",
+    "Stop hunt below equal lows": "hunted stops below a support",
+    "Stop hunt above equal highs": "hunted stops above a resistance",
+    "Equal highs (liquidity above)": "resistance with stops sitting above it",
+    "Equal lows (liquidity below)": "support with stops sitting below it",
+    "Prev-day low sweep": "swept yesterday's low",
+    "Prev-day high sweep": "swept yesterday's high",
+    # gaps / zones
+    "Bullish FVG": "left a price gap below to buy into",
+    "Bearish FVG": "left a price gap above to sell into",
+    "Bullish order block": "sitting on a strong buy zone",
+    "Bearish order block": "sitting under a strong sell zone",
+    "OB retest (mitigation)": "retesting a zone that's holding",
+    "Breaker (bullish OB failed)": "old support flipped to resistance",
+    "Breaker (bearish OB failed)": "old resistance flipped to support",
+    # shift
+    "MSS bullish": "structure flipped up (buyers took control)",
+    "MSS bearish": "structure flipped down (sellers took control)",
+    # order flow
+    "CVD BULLISH": "buyers in control of volume",
+    "CVD BEARISH": "sellers in control of volume",
+    "CISD BULLISH": "momentum just turned up",
+    "CISD BEARISH": "momentum just turned down",
+}
+
+
+def _plain(tag):
+    """Turn an SMC tag into a plain-English phrase (leaves unknown tags as-is)."""
+    return PLAIN_TERMS.get(tag, tag)
+
+
 def run_agent():
 
     print("\n==============================")
@@ -528,26 +569,42 @@ Price: {best['price']}
     #    signal never repeats while open, but the same coin on a different
     #    timeframe — or a different strategy — alerts separately.
     if new_alerts:
-        lines = ["CRYPTO AGENT - NEW SIGNALS\n"]
-        if heat:
-            lines.append(f"Hot narrative: {heat_line}\n")
+        blocks = []
         for s, tr in new_alerts:
+            entry = tr["entry"]
+            # Signed % move to a level (what you'd make/lose exiting there).
+            def pct(level):
+                r = (level - entry) / entry * 100 if entry else 0
+                return r if s["direction"] == "LONG" else -r
+            action = "🟢 BUY" if s["direction"] == "LONG" else "🔴 SELL"
+            strat_name = "Trend-following" if s["strategy"] == "TrendMA" else s["strategy"]
+
+            b = [
+                f"{action}  {s['coin']}   ·   {s['confidence']}%",
+                f"{s['horizon']} ({s['timeframe']}) · {strat_name}",
+                "",
+                f"💵 Entry   {fmt_price(entry)}",
+                f"🛑 Stop    {fmt_price(tr['stop'])}   ({pct(tr['stop']):+.1f}%)",
+            ]
             if s["strategy"] == "TrendMA":
-                exit_line = "   Exit  on trend flip (MA cross down)\n"
-                feat_line = ""
+                b.append("🔄 Exit    when the trend flips (MA cross down)")
             else:
-                exit_line = f"   TP1   {fmt_price(tr['tp1'])}   TP2 {fmt_price(tr['tp2'])}\n"
+                b.append(
+                    f"🎯 Target  {fmt_price(tr['tp1'])}  ({pct(tr['tp1']):+.1f}%)"
+                    f"  then  {fmt_price(tr['tp2'])}  ({pct(tr['tp2']):+.1f}%)"
+                )
                 feats = s.get("smc_features") or []
-                feat_line = f"   SMC: {', '.join(feats[:3])}\n" if feats else ""
-            smc_line = f"   Structure {s['smc']}\n" if s.get("smc", "-") != "-" else ""
-            lines.append(
-                f"• {s['coin']}  {s['direction']}  {s['confidence']}%  [{sector_flow.sector_of(s['coin'])}]\n"
-                f"   {s['horizon']} ({s['timeframe']}) - {s['strategy']}\n"
-                f"   Entry {fmt_price(tr['entry'])}\n"
-                f"   Stop  {fmt_price(tr['stop'])}\n"
-                f"{exit_line}{smc_line}{feat_line}"
-            )
-        message = "\n".join(lines)
+                if s.get("smc", "-") != "-":
+                    feats = [s["smc"]] + feats
+                if feats:
+                    plain = [f"• {_plain(t)}" for t in feats[:3]]
+                    b.append("📋 Why it fired:\n   " + "\n   ".join(plain))
+            blocks.append("\n".join(b))
+
+        header = f"⚡ {len(new_alerts)} NEW SIGNAL{'S' if len(new_alerts) > 1 else ''}"
+        if heat:
+            header += f"\nHot sectors: {heat_line}"
+        message = header + "\n\n" + "\n\n———\n\n".join(blocks)
         asyncio.run(send_alert(message))
         print(message)
     else:
