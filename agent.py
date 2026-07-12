@@ -456,6 +456,7 @@ def run_agent():
     paused = health_monitor.paused_coins() if ENABLE_HEALTH else set()
     if paused:
         print(f"Health monitor: paused (decaying) coins skipped -> {sorted(paused)}")
+    new_alerts = []   # only genuinely NEW positions get a Telegram ping
     for s in qualified:
         if open_count >= MAX_OPEN_TRADES:
             break
@@ -467,6 +468,9 @@ def run_agent():
         trade = calculate_trade(
             s["price"], s["direction"], s["atr"], s["strategy"], s.get("stop_level")
         )
+        # open_trade returns False if a trade for this coin+direction+timeframe+
+        # strategy is already open — so the SAME signal never re-fires, but the
+        # same coin on a DIFFERENT timeframe opens (and alerts) separately.
         opened = paper_trading.open_trade(
             s["coin"], s["direction"],
             trade["entry"], trade["stop"], trade["tp1"], trade["tp2"],
@@ -480,6 +484,7 @@ def run_agent():
             )
             open_count += 1
             open_by_dir[s["direction"]] = open_by_dir.get(s["direction"], 0) + 1
+            new_alerts.append((s, trade))
 
     # 4) Show the running accuracy scoreboard.
     stats = paper_trading.get_stats()
@@ -518,39 +523,35 @@ Price: {best['price']}
 """
     )
 
-    # 5) Ping Telegram with the TOP 3 signals, but only when the top-3 SET
-    #    changes (so you see anything new without repeat spam).
-    top3 = qualified[:3]
-    signature = "|".join(
-        sorted(f"{s['coin']}:{s['direction']}:{s['timeframe']}" for s in top3)
-    )
-
-    if is_new_alert(signature):
-        lines = ["CRYPTO AGENT - TOP SIGNALS\n"]
+    # 5) Ping Telegram ONCE for each genuinely NEW position opened this scan.
+    #    Dedup is by coin+direction+timeframe+strategy (open_trade), so the same
+    #    signal never repeats while open, but the same coin on a different
+    #    timeframe — or a different strategy — alerts separately.
+    if new_alerts:
+        lines = ["CRYPTO AGENT - NEW SIGNALS\n"]
         if heat:
             lines.append(f"Hot narrative: {heat_line}\n")
-        for i, s in enumerate(top3, 1):
-            tr = calculate_trade(
-                s["price"], s["direction"], s["atr"], s["strategy"], s.get("stop_level")
-            )
+        for s, tr in new_alerts:
+            if s["strategy"] == "TrendMA":
+                exit_line = "   Exit  on trend flip (MA cross down)\n"
+                feat_line = ""
+            else:
+                exit_line = f"   TP1   {fmt_price(tr['tp1'])}   TP2 {fmt_price(tr['tp2'])}\n"
+                feats = s.get("smc_features") or []
+                feat_line = f"   SMC: {', '.join(feats[:3])}\n" if feats else ""
             smc_line = f"   Structure {s['smc']}\n" if s.get("smc", "-") != "-" else ""
-            feats = s.get("smc_features") or []
-            feat_line = f"   SMC: {', '.join(feats[:3])}\n" if feats else ""
             lines.append(
-                f"{i}) {s['coin']}  {s['direction']}  {s['confidence']}%  [{sector_flow.sector_of(s['coin'])}]\n"
+                f"• {s['coin']}  {s['direction']}  {s['confidence']}%  [{sector_flow.sector_of(s['coin'])}]\n"
                 f"   {s['horizon']} ({s['timeframe']}) - {s['strategy']}\n"
                 f"   Entry {fmt_price(tr['entry'])}\n"
                 f"   Stop  {fmt_price(tr['stop'])}\n"
-                f"   TP1   {fmt_price(tr['tp1'])}   TP2 {fmt_price(tr['tp2'])}\n"
-                f"{smc_line}{feat_line}"
+                f"{exit_line}{smc_line}{feat_line}"
             )
         message = "\n".join(lines)
-
         asyncio.run(send_alert(message))
-        record_alert(signature)
         print(message)
     else:
-        print("Top-3 unchanged since last alert - logged, no repeat ping")
+        print("No new positions this scan - nothing to alert (dedup working).")
 
 
 # Loop forever only when run directly (python agent.py) — e.g. as a 24/7
