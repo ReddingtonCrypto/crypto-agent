@@ -30,6 +30,19 @@ LONG_ONLY = "--long-only" in sys.argv
 # An exit modification — history says these hurt; this lets us measure it.
 REVERSAL_EXIT = "--reversal-exit" in sys.argv
 
+# --conf-max=N : skip signals whose final confidence exceeds N. Live diagnostic
+#   showed the 95-100 bucket was the WORST performer (confidence looked
+#   anti-predictive) — this tests whether capping it actually helps at scale.
+# --max-stop=P : skip trades whose stop sits >P% from entry (kills the wide
+#   structural-stop outliers, e.g. the live XLM -12.6% loss).
+CONF_MAX = None
+MAX_STOP_PCT = None
+for _a in sys.argv:
+    if _a.startswith("--conf-max="):
+        CONF_MAX = float(_a.split("=", 1)[1])
+    if _a.startswith("--max-stop="):
+        MAX_STOP_PCT = float(_a.split("=", 1)[1])
+
 # Money-flow gate now lives in agent.passes_filters (mirrors live). A/B from CLI:
 #   --no-flow      : disable the gate.  --flow-mult=N : tune the surge multiple.
 if "--no-flow" in sys.argv:
@@ -463,6 +476,9 @@ def backtest_one(coin, timeframe, stats, btc_ctx):
                     sig["confidence"] = min(100, sig["confidence"] + 5)
                 else:
                     sig["confidence"] = max(0, sig["confidence"] - 15)
+            # --conf-max: drop the (live-worst) high-confidence bucket.
+            if CONF_MAX is not None and sig["confidence"] > CONF_MAX:
+                continue
             if not agent.passes_filters(sig):
                 continue
             key = (sig["strategy"], sig["direction"])
@@ -520,6 +536,11 @@ def backtest_one(coin, timeframe, stats, btc_ctx):
                 sig["price"], sig["direction"], sig["atr"], sig["strategy"],
                 sig.get("stop_level"),
             )
+            # --max-stop: skip setups whose stop is too far (oversized-loss guard).
+            if MAX_STOP_PCT is not None:
+                stop_dist = abs(trade["entry"] - trade["stop"]) / trade["entry"] * 100
+                if stop_dist > MAX_STOP_PCT:
+                    continue
             if USE_PARTIAL:
                 outcome, pnl, close_bar = simulate_partial(
                     df, i, sig["direction"], trade["entry"], trade["stop"], btc_ctx
