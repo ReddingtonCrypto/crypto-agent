@@ -331,7 +331,13 @@ def run_agent():
     print(datetime.now())
     print("==============================\n")
 
-    coins = universe.get_universe(exchange, limit=100)[:UNIVERSE_SIZE]
+    # Live universe: blend of market cap + Binance 24h volume + sector heat
+    # (liquidity/narrative). Fails soft to plain market-cap order.
+    try:
+        coins = universe.get_universe_ranked(exchange, limit=UNIVERSE_SIZE)
+    except Exception as e:
+        print(f"ranked universe failed ({type(e).__name__}); mcap fallback.")
+        coins = universe.get_universe(exchange, limit=100)[:UNIVERSE_SIZE]
     bias = market_bias()
 
     # Narrative awareness: which sectors is money rotating into right now.

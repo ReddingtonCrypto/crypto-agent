@@ -110,3 +110,73 @@ def get_universe(exchange, limit=100):
             pairs.append(pair)
 
     return (pairs or FALLBACK)[:limit]
+
+
+def get_universe_ranked(exchange, limit=40, pool=150,
+                        w_mcap=0.45, w_vol=0.40, w_heat=0.15):
+    """LIVE universe: blend market-cap rank + Binance 24h volume + sector-heat
+    (narrative) so we scan big, liquid, in-favour coins.
+
+    NOTE: uses live 24h volume + current sector heat, so it CANNOT be backtested
+    without look-ahead — the backtester keeps the plain mcap get_universe().
+    Fails soft to market-cap order if tickers/heat are unavailable.
+    """
+    import sector_flow
+
+    # 1) Candidate pool: top `pool` by market cap, tradeable on the exchange.
+    raw_needed = min(250, max(pool, 100))
+    symbols = _read_symbols_cache()
+    if symbols is None or len(symbols) < raw_needed:
+        try:
+            symbols = _coingecko_top(raw_needed)
+            _save_symbols_cache(symbols)
+        except Exception as e:
+            print(f"CoinGecko unavailable ({type(e).__name__}); mcap fallback.")
+            if symbols is None:
+                symbols = [p.split("/")[0] for p in FALLBACK]
+    try:
+        markets = exchange.load_markets()
+    except Exception as e:
+        print(f"Could not load markets ({type(e).__name__}); fallback list.")
+        return FALLBACK[:limit]
+
+    candidates = []  # (symbol, pair, mcap_rank)
+    for i, sym in enumerate(symbols[:pool]):
+        if sym in STABLES or sym in BLACKLIST:
+            continue
+        pair = f"{sym}/USDT"
+        m = markets.get(pair)
+        if m and m.get("spot") and m.get("active", True):
+            candidates.append((sym, pair, i))
+    if not candidates:
+        return FALLBACK[:limit]
+
+    # 2) Binance 24h quote volume (liquidity) — public, no key needed.
+    try:
+        tickers = exchange.fetch_tickers([p for _, p, _ in candidates])
+    except Exception as e:
+        print(f"fetch_tickers failed ({type(e).__name__}); volume weight off.")
+        tickers = {}
+    vols = {p: float((tickers.get(p) or {}).get("quoteVolume") or 0.0)
+            for _, p, _ in candidates}
+    max_vol = max(vols.values()) or 1.0
+
+    # 3) Sector heat (narrative) per coin.
+    try:
+        heat = {h["sector"]: h["avg_pct"] for h in sector_flow.sector_heat(exchange)}
+    except Exception:
+        heat = {}
+    hvals = list(heat.values()) or [0.0]
+    hmin, hspan = min(hvals), (max(hvals) - min(hvals)) or 1.0
+
+    # 4) Blended score, highest first.
+    scored = []
+    for sym, pair, mrank in candidates:
+        mcap_score = (pool - mrank) / pool                 # 1.0 = biggest cap
+        vol_score = vols[pair] / max_vol                   # 0..1 by liquidity
+        sec = sector_flow.sector_of(sym)
+        heat_score = (heat.get(sec, hmin) - hmin) / hspan if heat else 0.0
+        score = w_mcap * mcap_score + w_vol * vol_score + w_heat * heat_score
+        scored.append((score, pair))
+    scored.sort(reverse=True)
+    return [p for _, p in scored[:limit]]
