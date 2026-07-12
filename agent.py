@@ -30,11 +30,17 @@ exchange = make_exchange()
 
 # Trade horizons -> the candle timeframe(s) each one scans.
 # Day Trade = minutes/hours, Swing = a few days, Long-term = weeks/months.
+# Each timeframe maps to a trade-TYPE (horizon) so alerts/dashboard show what
+# kind of trade a signal is. Backtest note: 30m/1h/4h are net-negative, 12h/1d
+# are POSITIVE (higher TFs = cleaner ICT structure) — kept all for signal
+# coverage across trade styles; judge each TYPE on the dashboard breakdown.
 TIMEFRAMES = [
+    ("Scalp", "30m"),
     ("Day Trade", "1h"),
     ("Swing", "4h"),
+    ("Position", "12h"),
+    ("Long-term", "1d"),
 ]
-# (15m removed 2026-06-30 — backtest proved it dragged Trend negative.)
 
 # Which timeframe must AGREE on direction before a Trend signal is allowed.
 # 1h confirms UP the ladder (don't fight the bigger trend);

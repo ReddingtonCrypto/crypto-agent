@@ -17,6 +17,19 @@ DB = "database/crypto.db"
 OUT_DIR = "site"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
 
+# Timeframe -> trade type (horizon), so the dashboard shows what KIND of trade
+# each signal is. Backtest: 12h/1d positive, 30m/1h/4h negative.
+TF_TYPE = {
+    "30m": "Scalp", "1h": "Day Trade", "4h": "Swing",
+    "12h": "Position", "1d": "Long-term",
+}
+# Order for the breakdown table (shortest -> longest horizon).
+TF_ORDER = ["30m", "1h", "4h", "12h", "1d"]
+
+
+def _type_of(tf):
+    return TF_TYPE.get(tf, "-")
+
 
 CSS = """
 * { box-sizing: border-box; }
@@ -206,6 +219,34 @@ def _equity_svg(curve, width=700, height=180):
     )
 
 
+def _by_type(conn):
+    """Per trade-type (timeframe) scoreboard — shows which trade styles work."""
+    rows = []
+    for tf in TF_ORDER:
+        wins = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE timeframe=? AND status='WIN'", (tf,)
+        ).fetchone()[0]
+        losses = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE timeframe=? AND status='LOSS'", (tf,)
+        ).fetchone()[0]
+        open_c = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE timeframe=? AND status='OPEN'", (tf,)
+        ).fetchone()[0]
+        avg = conn.execute(
+            "SELECT AVG(pnl_pct) FROM paper_trades WHERE timeframe=? AND status IN ('WIN','LOSS')",
+            (tf,),
+        ).fetchone()[0]
+        closed = wins + losses
+        if closed == 0 and open_c == 0:
+            continue
+        rows.append({
+            "type": _type_of(tf), "tf": tf, "open": open_c, "closed": closed,
+            "win_rate": round(wins / closed * 100, 1) if closed else 0.0,
+            "avg_pnl": round(avg, 2) if avg is not None else 0.0,
+        })
+    return rows
+
+
 def _dir_span(d):
     cls = "long" if d == "LONG" else "short"
     return f'<span class="{cls}">{d}</span>'
@@ -240,6 +281,7 @@ def build():
     long_curve = _equity_curve(conn, "LONG")
     short_curve = _equity_curve(conn, "SHORT")
     by_dir = _by_direction(conn)
+    by_type = _by_type(conn)
     conn.close()
 
     health = health_monitor.coin_health()
@@ -318,7 +360,7 @@ def build():
             dircell = f"<td>{_dir_span(r['direction'])}</td>" if with_dir else ""
             return (
                 f"<tr><td>{r['coin']}{' 🎯' if r['tp1_hit'] else ''}</td>{dircell}"
-                f"<td>{r['timeframe'] or '-'}</td>"
+                f"<td>{_type_of(r['timeframe'])}</td><td>{r['timeframe'] or '-'}</td>"
                 f"<td>{r['score']}%</td><td>{fmt_price(r['entry'])}</td>"
                 f"<td>{fmt_price(r['stop'])}</td>"
                 f"<td>{fmt_price(r['tp1'])}</td><td>{fmt_price(r['tp2'])}</td>"
@@ -326,7 +368,7 @@ def build():
             )
         dirhead = "<th>Dir</th>" if with_dir else ""
         return (
-            f"<table><tr><th>Coin</th>{dirhead}<th>TF</th><th>Conf</th><th>Entry</th>"
+            f"<table><tr><th>Coin</th>{dirhead}<th>Type</th><th>TF</th><th>Conf</th><th>Entry</th>"
             "<th>Stop</th><th>TP1</th><th>TP2</th><th>Opened (UTC)</th></tr>"
             f"{''.join(row(r) for r in rows)}</table>"
         )
@@ -343,14 +385,14 @@ def build():
         for r in closed_t:
             cls = "win" if r["status"] == "WIN" else "loss" if r["status"] == "LOSS" else "empty"
             closed_rows += (
-                f"<tr><td>{r['coin']}</td><td>{r['strategy'] or '-'}</td><td>{r['timeframe'] or '-'}</td>"
+                f"<tr><td>{r['coin']}</td><td>{_type_of(r['timeframe'])}</td><td>{r['timeframe'] or '-'}</td>"
                 f"<td>{_dir_span(r['direction'])}</td>"
                 f'<td class="{cls}">{r["status"]}</td>'
                 f'<td class="{cls}">{r["pnl_pct"]}%</td>'
                 f"<td>{r['closed_at']}</td></tr>"
             )
         closed_table = (
-            "<table><tr><th>Coin</th><th>Strat</th><th>TF</th><th>Dir</th><th>Result</th>"
+            "<table><tr><th>Coin</th><th>Type</th><th>TF</th><th>Dir</th><th>Result</th>"
             "<th>P&L</th><th>Closed (UTC)</th></tr>"
             f"{closed_rows}</table>"
         )
@@ -374,6 +416,23 @@ def build():
             f"<div style='margin-top:12px'>{curve_svg}</div>"
             "</div>"
         )
+
+    # By trade type (timeframe) breakdown table
+    if by_type:
+        trows = "".join(
+            f"<tr><td>{t['type']}</td><td>{t['tf']}</td><td>{t['open']}</td>"
+            f"<td>{t['closed']}</td><td>{t['win_rate']}%</td>"
+            f"<td class=\"{'win' if t['avg_pnl'] >= 0 else 'loss'}\">{t['avg_pnl']:+}%</td></tr>"
+            for t in by_type
+        )
+        type_table = (
+            "<div class='sub'>How each trade style is performing — pick the types that work.</div>"
+            "<table><tr><th>Type</th><th>TF</th><th>Open</th><th>Closed</th>"
+            "<th>Win rate</th><th>Avg P&L</th></tr>"
+            f"{trows}</table>"
+        )
+    else:
+        type_table = '<div class="empty">No trades yet across the trade types.</div>'
 
     all_stats = {
         "win_rate": win_rate, "open": len(open_t), "closed": wins + losses,
@@ -401,7 +460,13 @@ def build():
         f"{long_panel}{short_panel}"
         "</div>"
 
-        # 3) Narrative / sector heat
+        # 3) Trade-type breakdown (which styles work)
+        "<div class='panel'>"
+        "<h2>By trade type</h2>"
+        f"{type_table}"
+        "</div>"
+
+        # Narrative / sector heat
         "<div class='panel'>"
         "<h2>Narrative / sector heat</h2>"
         f"{sector_table}"
