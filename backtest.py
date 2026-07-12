@@ -25,6 +25,10 @@ from strategies.smc.range_rotation import detect_range_rotation
 # Range-rotation strategy (--range): FRVP sweep-and-reclaim, tested standalone.
 USE_RANGE = "--range" in sys.argv
 LONG_ONLY = "--long-only" in sys.argv
+# --reversal-exit: while a trade is open, if BTC's market bias flips AGAINST the
+# trade's direction, close it at that bar's close (market-regime risk-off exit).
+# An exit modification — history says these hurt; this lets us measure it.
+REVERSAL_EXIT = "--reversal-exit" in sys.argv
 
 # Money-flow gate now lives in agent.passes_filters (mirrors live). A/B from CLI:
 #   --no-flow      : disable the gate.  --flow-mult=N : tune the surge multiple.
@@ -265,16 +269,21 @@ def simulate(df, i, direction, entry, stop, tp1):
     return None, None, None
 
 
-def simulate_partial(df, i, direction, entry, stop):
+def simulate_partial(df, i, direction, entry, stop, btc_ctx=None):
     """Partial-exit walk: bank PARTIAL_FRAC at TP1_R, run the rest to TP2_R
     (optionally moving the runner stop to break-even after TP1).
 
     Returns (label, pnl_pct_gross, close_bar) where pnl_pct_gross already blends
     both legs and is signed for the trade direction, or (None, None, None) if
     the trade never even reached TP1 or its stop (dropped, like the fixed path).
+
+    With --reversal-exit (and btc_ctx passed), the trade is closed at a bar's
+    close if BTC's market bias has flipped against the trade's direction.
     """
     highs = df["high"].to_numpy()
     lows = df["low"].to_numpy()
+    closes = df["close"].to_numpy()
+    ts = df["timestamp"].to_numpy()
     end = min(len(df), i + 1 + MAX_HOLD)
     R = abs(entry - stop) or 1e-9
 
@@ -326,6 +335,16 @@ def simulate_partial(df, i, direction, entry, stop):
                 if lo <= tp2:
                     total = realized + (1 - PARTIAL_FRAC) * leg(tp2)
                     return "WIN", total, k
+
+        # Market-regime reversal exit: if BTC flipped against us, close at this
+        # bar's close (the banked partial, if any, is kept). Checked after the
+        # intrabar TP/stop so those take precedence within the same bar.
+        if REVERSAL_EXIT and btc_ctx is not None:
+            bias = btc_ctx.bias_at(int(ts[k]))
+            if bias not in ("BOTH", direction):
+                px = float(closes[k])
+                total = (realized + (1 - PARTIAL_FRAC) * leg(px)) if banked else leg(px)
+                return ("WIN" if total > 0 else "LOSS"), total, k
 
     # Ran out of bars. If the partial was banked, close the runner at the last
     # close and count it; if TP1 was never reached, drop it (like the fixed path).
@@ -486,7 +505,7 @@ def backtest_one(coin, timeframe, stats, btc_ctx):
                 RETRACE_STATS["filled"] += 1
 
                 outcome, pnl, close_bar = simulate_partial(
-                    df, fill_bar, sig["direction"], entry_lvl, stop_lvl
+                    df, fill_bar, sig["direction"], entry_lvl, stop_lvl, btc_ctx
                 )
                 if outcome is None:
                     continue
@@ -503,7 +522,7 @@ def backtest_one(coin, timeframe, stats, btc_ctx):
             )
             if USE_PARTIAL:
                 outcome, pnl, close_bar = simulate_partial(
-                    df, i, sig["direction"], trade["entry"], trade["stop"]
+                    df, i, sig["direction"], trade["entry"], trade["stop"], btc_ctx
                 )
                 if outcome is None:
                     continue
