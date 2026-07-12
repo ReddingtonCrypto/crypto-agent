@@ -116,13 +116,13 @@ def update_open_trades(bars, trend_flipped=None):
         #      (no Variant C partials — let the trend run). ----
         if strategy == "TrendMA":
             flipped = trend_flipped and (coin, timeframe) in trend_flipped
-            exit_price = None
+            exit_price = reason = None
             if direction == "LONG" and lo <= stop:
-                exit_price = stop
+                exit_price, reason = stop, "stop hit"
             elif direction == "SHORT" and hi >= stop:
-                exit_price = stop
+                exit_price, reason = stop, "stop hit"
             elif flipped:
-                exit_price = bar["price"]
+                exit_price, reason = bar["price"], "trend flipped"
             if exit_price is not None:
                 pnl = round(_leg(entry, exit_price, direction), 2)
                 result = "WIN" if pnl > 0 else "LOSS"
@@ -133,6 +133,7 @@ def update_open_trades(bars, trend_flipped=None):
                 events.append({
                     "coin": coin, "direction": direction, "result": result,
                     "pnl_pct": pnl, "timeframe": timeframe, "strategy": strategy,
+                    "reason": reason,
                 })
             continue
 

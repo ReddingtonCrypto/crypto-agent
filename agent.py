@@ -425,9 +425,12 @@ def run_agent():
                 f"Locked: +{t['pnl_pct']}%  ·  runner to TP2, stop at break-even"
             ))
         else:
-            print(f"Trade closed: {t['coin']} {t['direction']} {tf} {mark} {t['pnl_pct']}%")
+            reason = t.get("reason")
+            why = f"  ·  {reason}" if reason else ""
+            strat = t.get("strategy", "")
+            print(f"Trade closed: {t['coin']} {t['direction']} {tf} {mark} {t['pnl_pct']}% {reason or ''}")
             asyncio.run(send_alert(
-                f"{emoji} {mark}  {t['coin']}  {t['direction']}  ({tf})\n"
+                f"{emoji} {mark}  {t['coin']}  {t['direction']}  ({tf}) {strat}{why}\n"
                 f"Result: {t['pnl_pct']}%"
             ))
 
