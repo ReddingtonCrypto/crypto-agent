@@ -148,6 +148,40 @@ def _dir_span(d):
     return f'<span class="{cls}">{d}</span>'
 
 
+def _run_health_html():
+    """Show whether recent scan cycles succeeded — so a broken bot is obvious
+    instead of just a silently stale dashboard."""
+    import run_health
+    rh = run_health.load()
+    if not rh or not rh.get("last"):
+        return '<div class="empty">No scan recorded yet (starts after the first run).</div>'
+
+    last = rh["last"]
+    ok = last["status"] == "ok"
+    cls = "win" if ok else "loss"
+    label = "OK" if ok else "ERROR"
+    extra = f" — {last['error']}" if (not ok and last.get("error")) else ""
+
+    rows = ""
+    for e in reversed(rh.get("history", [])[-10:]):
+        c = "win" if e["status"] == "ok" else "loss"
+        if e["status"] == "ok":
+            info = f"open {e.get('open', '-')}, closed {e.get('closed', '-')}, win {e.get('win_rate', '-')}%"
+        else:
+            info = e.get("error", "")
+        rows += (
+            f"<tr><td>{e['time']}</td>"
+            f"<td class='{c}'>{e['status'].upper()}</td><td>{info}</td></tr>"
+        )
+
+    return (
+        f"<div class='sub'>Last scan: {last['time']} — <b class='{cls}'>{label}</b>{extra} "
+        "(scans every 5 min)</div>"
+        "<table><tr><th>Time (UTC)</th><th>Status</th><th>Details</th></tr>"
+        f"{rows}</table>"
+    )
+
+
 def build():
     os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -281,6 +315,8 @@ def build():
         f"<div class='card'><div class='label'>Expired</div><div class='value'>{expired}</div></div>"
         f"<div class='card'><div class='label'>Avg P&L</div><div class='value'>{avg}%</div></div>"
         "</div>"
+        "<h2>Run health</h2>"
+        f"{_run_health_html()}"
         "<h2>Equity curve</h2>"
         f"{_equity_svg(curve)}"
         "<h2>Strategy scoreboard</h2>"

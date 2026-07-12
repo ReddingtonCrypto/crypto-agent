@@ -7,3 +7,5 @@ site/
 data/universe.json
 data/bt_cache/
 data/wf_cache/
+data/run_health.json
+history/backups/

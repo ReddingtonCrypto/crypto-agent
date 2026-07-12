@@ -519,16 +519,33 @@ Price: {best['price']}
 # Interval is configurable via CRYPTO_SCAN_INTERVAL (seconds); default 900 (15m).
 if __name__ == "__main__":
     import os
+    import run_health
 
     interval = int(os.environ.get("CRYPTO_SCAN_INTERVAL", "900"))
 
     while True:
 
+        prev = run_health.load()
+        prev_status = prev["last"]["status"] if prev and prev.get("last") else "ok"
+
         try:
             run_agent()
+            stats = paper_trading.get_stats()
+            run_health.record(
+                "ok", open=stats["open"], closed=stats["closed"],
+                win_rate=stats["win_rate"],
+            )
 
         except Exception as e:
             print("Agent error:", e)
+            run_health.record("error", error=f"{type(e).__name__}: {e}")
+            # Ping Telegram only on the transition into failure (no spam if it
+            # keeps failing) — otherwise a broken bot just goes silently stale.
+            if prev_status == "ok":
+                try:
+                    asyncio.run(send_alert(f"⚠️ crypto-agent scan FAILED: {type(e).__name__}: {e}"))
+                except Exception:
+                    pass
 
         print(f"\nWaiting {interval // 60} minutes...\n", flush=True)
 
