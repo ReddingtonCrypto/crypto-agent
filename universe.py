@@ -152,8 +152,9 @@ def get_universe_ranked(exchange, limit=40, pool=150,
         return FALLBACK[:limit]
 
     # 2) Binance 24h quote volume (liquidity) — public, no key needed.
+    # Fetch ALL tickers (the vision host rejects a symbol-list filter) then index.
     try:
-        tickers = exchange.fetch_tickers([p for _, p, _ in candidates])
+        tickers = exchange.fetch_tickers()
     except Exception as e:
         print(f"fetch_tickers failed ({type(e).__name__}); volume weight off.")
         tickers = {}
