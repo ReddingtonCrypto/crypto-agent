@@ -66,14 +66,42 @@ def meanrev(df, lo=30, hi=55):
     r = rsi(df["c"])
     return _ffill_state(r < lo, r > hi)
 
+def dual_cross(df, fast=20, slow=100):
+    return (df["c"].rolling(fast).mean() > df["c"].rolling(slow).mean()).astype(float)
+
 STRATS = {
     "buy_hold": buy_hold,
+    "trend_ma20": lambda d: trend_ma(d, 20),
     "trend_ma50": lambda d: trend_ma(d, 50),
     "trend_ma100": lambda d: trend_ma(d, 100),
+    "trend_ma150": lambda d: trend_ma(d, 150),
+    "trend_ma200": lambda d: trend_ma(d, 200),
+    "dualcross20_100": lambda d: dual_cross(d, 20, 100),
     "momentum30": lambda d: momentum(d, 30),
+    "momentum60": lambda d: momentum(d, 60),
+    "momentum90": lambda d: momentum(d, 90),
     "donchian20": lambda d: donchian(d, 20),
+    "donchian50": lambda d: donchian(d, 50),
     "meanrev_rsi": meanrev,
 }
+
+
+def trades(df, pos):
+    """Per-trade returns for a long/flat position (contiguous long runs), net fees."""
+    p = pos.fillna(0.0).to_numpy()
+    c = df["c"].to_numpy()
+    out = []
+    in_pos = False
+    entry = 0.0
+    for i in range(1, len(p)):
+        if p[i] == 1 and not in_pos:
+            in_pos, entry = True, c[i]
+        elif p[i] == 0 and in_pos:
+            out.append((c[i] / entry - 1) - 2 * FEE)
+            in_pos = False
+    if in_pos:  # still open at the end — close at last price
+        out.append((c[-1] / entry - 1) - 2 * FEE)
+    return out
 
 
 def net_returns(df, pos):
@@ -99,9 +127,9 @@ def stats(port):
 def main():
     coins = load_coins(TF)
     print(f"Strategy lab — {len(coins)} coins on {TF}, fee {FEE*200:.1f}% round-trip, LONG/FLAT\n")
-    print(f"{'Strategy':<13} {'Full ret':>9} {'Sharpe':>7} {'MaxDD':>7} | "
-          f"{'1st-half':>9} {'2nd-half':>9}  Verdict")
-    print("-" * 78)
+    print(f"{'Strategy':<15} {'FullRet':>7} {'Sharpe':>6} {'MaxDD':>5} | "
+          f"{'1st-h':>7} {'2nd-h':>7} {'W-fwd':>7} | {'Trds':>5} {'Win%':>5} {'Avg/tr':>6}")
+    print("-" * 92)
     for name, fn in STRATS.items():
         # Build an equal-weight portfolio: average per-bar net return across coins.
         per_coin = []
@@ -113,9 +141,17 @@ def main():
         full_r, sharpe, dd = stats(port)
         first_r, _, _ = stats(port.iloc[:half])
         last_r, _, _ = stats(port.iloc[half:])
-        robust = "OK both halves" if (first_r > 0 and last_r > 0) else "fails a half"
-        print(f"{name:<13} {full_r:>8.0f}% {sharpe:>7.2f} {dd:>6.0f}% | "
-              f"{first_r:>8.0f}% {last_r:>8.0f}%  {robust}")
+        robust = "OK both" if (first_r > 0 and last_r > 0) else "FAILS"
+        # Per-trade stats across all coins.
+        all_tr = []
+        for df in coins.values():
+            all_tr += trades(df, fn(df).clip(0, 1))
+        n = len(all_tr)
+        wr = 100 * sum(1 for t in all_tr if t > 0) / n if n else 0
+        avg = 100 * (sum(all_tr) / n) if n else 0
+        print(f"{name:<15} {full_r:>7.0f}% {sharpe:>6.2f} {dd:>5.0f}% | "
+              f"{first_r:>7.0f}% {last_r:>7.0f}% {robust:>7} | "
+              f"{n:>5} {wr:>5.0f}% {avg:>+6.2f}%")
 
 
 if __name__ == "__main__":
