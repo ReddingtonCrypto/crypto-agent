@@ -310,25 +310,30 @@ def build():
             f"(watching the last {health_monitor.HEALTH_WINDOW_DAYS} days).</div>"
         )
 
-    # Open-trades tables, split by side (for side-by-side display).
-    def _open_table(rows):
+    # Open-trades tables (with_dir adds a Direction column for the combined view).
+    def _open_table(rows, with_dir=False):
         if not rows:
             return '<div class="empty">None open right now.</div>'
-        body = "".join(
-            f"<tr><td>{r['coin']}{' 🎯' if r['tp1_hit'] else ''}</td>"
-            f"<td>{r['timeframe'] or '-'}</td>"
-            f"<td>{r['score']}%</td><td>{fmt_price(r['entry'])}</td>"
-            f"<td>{fmt_price(r['stop'])}</td>"
-            f"<td>{fmt_price(r['tp1'])}</td><td>{r['opened_at']}</td></tr>"
-            for r in rows
-        )
+        def row(r):
+            dircell = f"<td>{_dir_span(r['direction'])}</td>" if with_dir else ""
+            return (
+                f"<tr><td>{r['coin']}{' 🎯' if r['tp1_hit'] else ''}</td>{dircell}"
+                f"<td>{r['timeframe'] or '-'}</td>"
+                f"<td>{r['score']}%</td><td>{fmt_price(r['entry'])}</td>"
+                f"<td>{fmt_price(r['stop'])}</td>"
+                f"<td>{fmt_price(r['tp1'])}</td><td>{fmt_price(r['tp2'])}</td>"
+                f"<td>{r['opened_at']}</td></tr>"
+            )
+        dirhead = "<th>Dir</th>" if with_dir else ""
         return (
-            "<table><tr><th>Coin</th><th>TF</th><th>Conf</th><th>Entry</th>"
-            "<th>Stop</th><th>TP1</th><th>Opened (UTC)</th></tr>"
-            f"{body}</table>"
+            f"<table><tr><th>Coin</th>{dirhead}<th>TF</th><th>Conf</th><th>Entry</th>"
+            "<th>Stop</th><th>TP1</th><th>TP2</th><th>Opened (UTC)</th></tr>"
+            f"{''.join(row(r) for r in rows)}</table>"
         )
     open_long = [r for r in open_t if r["direction"] == "LONG"]
     open_short = [r for r in open_t if r["direction"] == "SHORT"]
+    ordered_open = sorted(open_t, key=lambda r: 0 if r["direction"] == "LONG" else 1)
+    open_all_table = _open_table(ordered_open, with_dir=True)
     open_long_table = _open_table(open_long)
     open_short_table = _open_table(open_short)
 
@@ -402,7 +407,11 @@ def build():
         f"{sector_table}"
         "</div>"
 
-        # 4) Open trades — longs | shorts side by side
+        # 4) Open trades — all on top, then longs | shorts side by side
+        "<div class='panel'>"
+        f"<h2>📊 All open trades ({len(open_t)})</h2>"
+        f"{open_all_table}"
+        "</div>"
         "<div class='row'>"
         "<div class='panel'>"
         f"<h2>📈 Open longs ({len(open_long)})</h2>"
