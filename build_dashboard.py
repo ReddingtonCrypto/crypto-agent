@@ -62,6 +62,11 @@ tr:nth-child(even) td { background: #0e131a; }
 .status { padding:11px 14px; border-radius:10px; font-size:13px; font-weight:600; margin:12px 0; }
 .status.ok { background:#0f2417; color:#3fb950; border:1px solid #1f6f3d; }
 .status.bad { background:#2b1414; color:#f85149; border:1px solid #6f1f1f; }
+/* Side-by-side rows that stack on narrow screens */
+.row { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-start; }
+.row > .panel { flex:1 1 380px; min-width:0; }
+.panel { overflow-x:auto; }
+.panel.accent.red { border-left-color:#f85149; }
 """
 
 
@@ -305,25 +310,27 @@ def build():
             f"(watching the last {health_monitor.HEALTH_WINDOW_DAYS} days).</div>"
         )
 
-    # Open-trades table, all directions (longs listed first).
-    if open_t:
-        ordered = sorted(open_t, key=lambda r: 0 if r["direction"] == "LONG" else 1)
-        open_rows = "".join(
+    # Open-trades tables, split by side (for side-by-side display).
+    def _open_table(rows):
+        if not rows:
+            return '<div class="empty">None open right now.</div>'
+        body = "".join(
             f"<tr><td>{r['coin']}{' 🎯' if r['tp1_hit'] else ''}</td>"
-            f"<td>{_dir_span(r['direction'])}</td>"
-            f"<td>{r['strategy'] or '-'}</td><td>{r['timeframe'] or '-'}</td>"
+            f"<td>{r['timeframe'] or '-'}</td>"
             f"<td>{r['score']}%</td><td>{fmt_price(r['entry'])}</td>"
             f"<td>{fmt_price(r['stop'])}</td>"
             f"<td>{fmt_price(r['tp1'])}</td><td>{r['opened_at']}</td></tr>"
-            for r in ordered
+            for r in rows
         )
-        open_table = (
-            "<table><tr><th>Coin</th><th>Dir</th><th>Strat</th><th>TF</th><th>Conf</th>"
-            "<th>Entry</th><th>Stop</th><th>TP1</th><th>Opened (UTC)</th></tr>"
-            f"{open_rows}</table>"
+        return (
+            "<table><tr><th>Coin</th><th>TF</th><th>Conf</th><th>Entry</th>"
+            "<th>Stop</th><th>TP1</th><th>Opened (UTC)</th></tr>"
+            f"{body}</table>"
         )
-    else:
-        open_table = '<div class="empty">No open trades right now.</div>'
+    open_long = [r for r in open_t if r["direction"] == "LONG"]
+    open_short = [r for r in open_t if r["direction"] == "SHORT"]
+    open_long_table = _open_table(open_long)
+    open_short_table = _open_table(open_short)
 
     # Closed-trades table
     if closed_t:
@@ -345,13 +352,12 @@ def build():
     else:
         closed_table = '<div class="empty">No closed trades yet - they resolve as price hits target or stop.</div>'
 
-    # Direction P&L panel (reused for LONG and SHORT).
-    def _dir_panel(title, emoji, stats, curve_svg, accent=False):
+    # P&L panel (reused for All / Longs / Shorts).
+    def _pnl_panel(title, emoji, stats, curve_svg, accent=""):
         avg_cls = "win" if stats["avg_pnl"] >= 0 else "loss"
         tot_cls = "win" if stats["total_pnl"] >= 0 else "loss"
-        acls = " accent" if accent else ""
         return (
-            f"<div class='panel{acls}'>"
+            f"<div class='panel{accent}'>"
             f"<h2>{emoji} {title}</h2>"
             "<div class='cards'>"
             f"<div class='card'><div class='label'>Win Rate</div><div class='value'>{stats['win_rate']}%</div></div>"
@@ -364,8 +370,13 @@ def build():
             "</div>"
         )
 
-    long_panel = _dir_panel("Longs P&L", "📈", by_dir["LONG"], _equity_svg(long_curve), accent=True)
-    short_panel = _dir_panel("Shorts P&L", "📉", by_dir["SHORT"], _equity_svg(short_curve))
+    all_stats = {
+        "win_rate": win_rate, "open": len(open_t), "closed": wins + losses,
+        "avg_pnl": avg, "total_pnl": round(curve[-1], 1) if curve else 0.0,
+    }
+    all_panel = _pnl_panel("All trades P&L", "📊", all_stats, _equity_svg(curve))
+    long_panel = _pnl_panel("Longs P&L", "📈", by_dir["LONG"], _equity_svg(long_curve), accent=" accent")
+    short_panel = _pnl_panel("Shorts P&L", "📉", by_dir["SHORT"], _equity_svg(short_curve), accent=" accent red")
 
     html = (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
@@ -376,38 +387,40 @@ def build():
         "<h1>Crypto Agent — Paper Trading</h1>"
         f"<div class='sub'>Updated {now} · data: <b>{source}</b></div>"
 
-        # ---- System status (green = smooth, red = needs you) ----
+        # 1) System status
         f"{_system_status_html()}"
 
-        # ---- Narrative / sector heat ----
+        # 2) All-trades P&L, then Longs | Shorts side by side
+        f"{all_panel}"
+        "<div class='row'>"
+        f"{long_panel}{short_panel}"
+        "</div>"
+
+        # 3) Narrative / sector heat
         "<div class='panel'>"
         "<h2>Narrative / sector heat</h2>"
         f"{sector_table}"
         "</div>"
 
-        # ---- Open trades (all directions) ----
+        # 4) Open trades — longs | shorts side by side
+        "<div class='row'>"
         "<div class='panel'>"
-        f"<h2>Open trades ({len(open_t)})</h2>"
-        f"{open_table}"
+        f"<h2>📈 Open longs ({len(open_long)})</h2>"
+        f"{open_long_table}"
+        "</div>"
+        "<div class='panel'>"
+        f"<h2>📉 Open shorts ({len(open_short)})</h2>"
+        f"{open_short_table}"
+        "</div>"
         "</div>"
 
-        # ---- Strategy scoreboard (with P&L) ----
-        "<div class='panel'>"
-        "<h2>Strategies</h2>"
-        f"{strat_table}"
-        "</div>"
-
-        # ---- Longs then Shorts P&L ----
-        f"{long_panel}"
-        f"{short_panel}"
-
-        # ---- Coin health monitor ----
+        # 5) Coin health monitor
         "<div class='panel'>"
         "<h2>Coin health monitor</h2>"
         f"{health_table}"
         "</div>"
 
-        # ---- Trade history (at the end) ----
+        # 6) Trade history (at the very end)
         "<div class='panel'>"
         "<h2>Trade history</h2>"
         f"{closed_table}"
