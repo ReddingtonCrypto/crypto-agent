@@ -48,6 +48,13 @@ for _a in sys.argv:
         MAX_STOP_PCT = float(_a.split("=", 1)[1])
     if _a.startswith("--split="):
         SPLIT = _a.split("=", 1)[1]
+# --htf-gate=1d : top-down MTF — only take a lower-timeframe signal if it aligns
+# with the coin's OWN higher-timeframe (e.g. 1d) EMA trend. "Analyse big, execute
+# small." No look-ahead (uses the HTF candle already closed by that bar).
+HTF_GATE = None
+for _a in sys.argv:
+    if _a.startswith("--htf-gate="):
+        HTF_GATE = _a.split("=", 1)[1]
 
 # Money-flow gate now lives in agent.passes_filters (mirrors live). A/B from CLI:
 #   --no-flow      : disable the gate.  --flow-mult=N : tune the surge multiple.
@@ -427,6 +434,32 @@ def simulate_partial_levels(df, i, direction, entry, stop, tp1, tp2):
     return None, None, None
 
 
+_HTF_CACHE = {}
+
+
+def _htf_bias(coin, htf):
+    """(times, dirs): a coin's HTF EMA20-vs-EMA50 bias keyed by candle CLOSE time
+    (no look-ahead). Cached per coin+htf."""
+    key = (coin, htf)
+    if key in _HTF_CACHE:
+        return _HTF_CACHE[key]
+    df = pd.DataFrame(
+        get_history(coin, htf),
+        columns=["timestamp", "open", "high", "low", "close", "volume"],
+    )
+    agent.add_indicators(df)
+    period = EXCHANGE.parse_timeframe(htf) * 1000
+    times, dirs = [], []
+    for idx in range(len(df)):
+        ema50 = df["EMA50"].iat[idx]
+        if pd.isna(ema50):
+            continue
+        times.append(int(df["timestamp"].iat[idx]) + period)
+        dirs.append("LONG" if df["EMA20"].iat[idx] > ema50 else "SHORT")
+    _HTF_CACHE[key] = (times, dirs)
+    return times, dirs
+
+
 def backtest_one(coin, timeframe, stats, btc_ctx):
     bars = get_history(coin, timeframe)
     # Cap the simulated window to HISTORY even when the cache holds more, so
@@ -481,10 +514,20 @@ def backtest_one(coin, timeframe, stats, btc_ctx):
         # Market-bias tilt at this bar's time (same as live), no look-ahead.
         bias = btc_ctx.bias_at(int(df["timestamp"].iat[i])) if btc_ctx else "BOTH"
 
+        # Top-down MTF gate: the coin's OWN higher-timeframe bias at this bar.
+        htf_dir = None
+        if HTF_GATE and HTF_GATE != timeframe:
+            ht, hd = _htf_bias(coin, HTF_GATE)
+            j = bisect.bisect_right(ht, int(df["timestamp"].iat[i])) - 1
+            htf_dir = hd[j] if j >= 0 else None
+
         for sig in res["signals"]:
             # --long-only: spot traders only buy; test whether dropping shorts
             # (a bull-market winner live) actually generalises across regimes.
             if LONG_ONLY and sig["direction"] != "LONG":
+                continue
+            # --htf-gate: only execute a lower-TF entry aligned with the HTF trend.
+            if htf_dir is not None and sig["direction"] != htf_dir:
                 continue
             if bias != "BOTH":
                 if sig["direction"] == bias:
