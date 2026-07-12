@@ -21,28 +21,44 @@ OUT_FILE = os.path.join(OUT_DIR, "index.html")
 CSS = """
 * { box-sizing: border-box; }
 body {
-  margin: 0; padding: 16px;
+  margin: 0; padding: 16px; max-width: 900px; margin: 0 auto;
   background: #0d1117; color: #e6edf3;
   font-family: -apple-system, Segoe UI, Roboto, sans-serif;
 }
-h1 { font-size: 20px; margin: 0 0 4px; }
-.sub { color: #8b949e; font-size: 12px; margin-bottom: 16px; }
-.cards { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
+h1 { font-size: 21px; margin: 0 0 4px; }
+.sub { color: #8b949e; font-size: 12px; margin: 2px 0 4px; }
+.sub b { color: #c9d1d9; }
+
+/* Panels group related content into clear cards */
+.panel {
+  background: #11161d; border: 1px solid #30363d; border-radius: 12px;
+  padding: 14px 16px; margin: 14px 0;
+}
+.panel.accent { border-left: 4px solid #3fb950; }
+.panel > h2:first-child { margin-top: 0; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+h2 .tag { font-size: 11px; color: #8b949e; font-weight: 500; }
+
+.cards { display: flex; flex-wrap: wrap; gap: 10px; }
 .card {
   background: #161b22; border: 1px solid #30363d; border-radius: 10px;
-  padding: 12px 16px; min-width: 90px; flex: 1;
+  padding: 10px 14px; min-width: 88px; flex: 1;
 }
 .card .label { color: #8b949e; font-size: 11px; text-transform: uppercase; }
 .card .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
-h2 { font-size: 15px; margin: 20px 0 8px; }
+
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #21262d; }
+th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid #21262d; }
 th { color: #8b949e; font-weight: 600; }
-.long { color: #3fb950; }
-.short { color: #f85149; }
+tr:nth-child(even) td { background: #0e131a; }
+.long { color: #3fb950; font-weight: 600; }
+.short { color: #f85149; font-weight: 600; }
 .win { color: #3fb950; font-weight: 700; }
 .loss { color: #f85149; font-weight: 700; }
-.empty { color: #8b949e; font-style: italic; padding: 12px 0; }
+.empty { color: #8b949e; font-style: italic; padding: 10px 0; }
+.pill { display:inline-block; padding:1px 7px; border-radius:20px; font-size:11px; font-weight:700; }
+.pill.ok { background:#132b1a; color:#3fb950; }
+.pill.bad { background:#2b1414; color:#f85149; }
 """
 
 
@@ -97,18 +113,57 @@ def _by_strategy(conn):
     return rows
 
 
-def _equity_curve(conn):
-    """Cumulative realized P&L (%) over every closed trade, oldest first."""
-    rows = conn.execute(
-        "SELECT pnl_pct FROM paper_trades "
-        "WHERE status IN ('WIN','LOSS','EXPIRED') AND pnl_pct IS NOT NULL "
-        "ORDER BY closed_at ASC"
-    ).fetchall()
+def _equity_curve(conn, direction=None):
+    """Cumulative realized P&L (%) over closed trades, oldest first.
+    Pass direction='LONG' to chart only the trades you actually take."""
+    q = ("SELECT pnl_pct FROM paper_trades "
+         "WHERE status IN ('WIN','LOSS','EXPIRED') AND pnl_pct IS NOT NULL ")
+    args = ()
+    if direction:
+        q += "AND direction=? "
+        args = (direction,)
+    q += "ORDER BY closed_at ASC"
+    rows = conn.execute(q, args).fetchall()
     curve, total = [0.0], 0.0
     for r in rows:
         total += r[0]
         curve.append(round(total, 2))
     return curve
+
+
+def _by_direction(conn):
+    """Stats split by LONG vs SHORT — you only trade LONG (spot buys), so this
+    lets you read your real performance apart from the shorts."""
+    out = {}
+    for d in ("LONG", "SHORT"):
+        wins = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE direction=? AND status='WIN'", (d,)
+        ).fetchone()[0]
+        losses = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE direction=? AND status='LOSS'", (d,)
+        ).fetchone()[0]
+        open_c = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE direction=? AND status='OPEN'", (d,)
+        ).fetchone()[0]
+        avg = conn.execute(
+            "SELECT AVG(pnl_pct) FROM paper_trades WHERE direction=? AND status IN ('WIN','LOSS')",
+            (d,),
+        ).fetchone()[0]
+        total = conn.execute(
+            "SELECT SUM(pnl_pct) FROM paper_trades "
+            "WHERE direction=? AND status IN ('WIN','LOSS','EXPIRED') AND pnl_pct IS NOT NULL",
+            (d,),
+        ).fetchone()[0]
+        closed = wins + losses
+        out[d] = {
+            "open": open_c,
+            "closed": closed,
+            "wins": wins,
+            "win_rate": round(wins / closed * 100, 1) if closed else 0.0,
+            "avg_pnl": round(avg, 2) if avg is not None else 0.0,
+            "total_pnl": round(total, 1) if total is not None else 0.0,
+        }
+    return out
 
 
 def _equity_svg(curve, width=700, height=180):
@@ -189,6 +244,8 @@ def build():
     open_t, closed_t, wins, losses, expired, avg = _rows(conn)
     strat_rows = _by_strategy(conn)
     curve = _equity_curve(conn)
+    long_curve = _equity_curve(conn, "LONG")
+    by_dir = _by_direction(conn)
     conn.close()
 
     health = health_monitor.coin_health()
@@ -259,24 +316,27 @@ def build():
             f"(watching the last {health_monitor.HEALTH_WINDOW_DAYS} days).</div>"
         )
 
-    # Open-trades table
-    if open_t:
-        open_rows = "".join(
+    # Open-trades tables, split by side (longs are what you actually trade).
+    def _open_table(rows):
+        if not rows:
+            return '<div class="empty">None open right now.</div>'
+        body = "".join(
             f"<tr><td>{r['coin']}{' 🎯' if r['tp1_hit'] else ''}</td>"
             f"<td>{r['strategy'] or '-'}</td><td>{r['timeframe'] or '-'}</td>"
-            f"<td>{_dir_span(r['direction'])}</td>"
             f"<td>{r['score']}%</td><td>{fmt_price(r['entry'])}</td>"
             f"<td>{fmt_price(r['stop'])}</td>"
             f"<td>{fmt_price(r['tp1'])}</td><td>{r['opened_at']}</td></tr>"
-            for r in open_t
+            for r in rows
         )
-        open_table = (
-            "<table><tr><th>Coin</th><th>Strat</th><th>TF</th><th>Dir</th><th>Conf</th><th>Entry</th>"
+        return (
+            "<table><tr><th>Coin</th><th>Strat</th><th>TF</th><th>Conf</th><th>Entry</th>"
             "<th>Stop</th><th>TP1</th><th>Opened (UTC)</th></tr>"
-            f"{open_rows}</table>"
+            f"{body}</table>"
         )
-    else:
-        open_table = '<div class="empty">No open trades right now.</div>'
+    open_long = [r for r in open_t if r["direction"] == "LONG"]
+    open_short = [r for r in open_t if r["direction"] == "SHORT"]
+    open_long_table = _open_table(open_long)
+    open_short_table = _open_table(open_short)
 
     # Closed-trades table
     if closed_t:
@@ -298,15 +358,63 @@ def build():
     else:
         closed_table = '<div class="empty">No closed trades yet - they resolve as price hits target or stop.</div>'
 
+    # LONG panel cards (what you actually trade)
+    lg = by_dir["LONG"]
+    lg_avg_cls = "win" if lg["avg_pnl"] >= 0 else "loss"
+    lg_tot_cls = "win" if lg["total_pnl"] >= 0 else "loss"
+
+    # Direction-breakdown table (LONG vs SHORT)
+    def _dir_row(d):
+        s = by_dir[d]
+        acls = "win" if s["avg_pnl"] >= 0 else "loss"
+        tcls = "win" if s["total_pnl"] >= 0 else "loss"
+        return (
+            f"<tr><td>{_dir_span(d)}</td><td>{s['open']}</td><td>{s['closed']}</td>"
+            f"<td>{s['win_rate']}%</td>"
+            f"<td class='{acls}'>{s['avg_pnl']:+}%</td>"
+            f"<td class='{tcls}'>{s['total_pnl']:+}%</td></tr>"
+        )
+    dir_table = (
+        "<table><tr><th>Direction</th><th>Open</th><th>Closed</th><th>Win rate</th>"
+        "<th>Avg P&L</th><th>Total P&L</th></tr>"
+        f"{_dir_row('LONG')}{_dir_row('SHORT')}</table>"
+    )
+
+    # Run-health one-liner for the header
+    import run_health
+    rh = run_health.load()
+    if rh and rh.get("last"):
+        _ok = rh["last"]["status"] == "ok"
+        health_pill = f"<span class='pill {'ok' if _ok else 'bad'}'>{'OK' if _ok else 'ERROR'}</span>"
+        health_hdr = f" · last scan {rh['last']['time'][11:16]} UTC {health_pill}"
+    else:
+        health_hdr = ""
+
     html = (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         "<meta http-equiv='refresh' content='120'>"
         "<title>Crypto Agent Dashboard</title>"
         f"<style>{CSS}</style></head><body>"
-        "<h1>Crypto Agent - Paper Trading</h1>"
-        f"<div class='sub'>Updated {now} - refreshes every 2 min - "
-        f"data: <b>{source}</b></div>"
+        "<h1>Crypto Agent — Paper Trading</h1>"
+        f"<div class='sub'>Updated {now} · data: <b>{source}</b>{health_hdr}</div>"
+
+        # ---- LONG panel: the trades you actually take ----
+        "<div class='panel accent'>"
+        "<h2>📈 Longs only <span class='tag'>— what you actually trade (spot buys)</span></h2>"
+        "<div class='cards'>"
+        f"<div class='card'><div class='label'>Win Rate</div><div class='value'>{lg['win_rate']}%</div></div>"
+        f"<div class='card'><div class='label'>Open</div><div class='value'>{lg['open']}</div></div>"
+        f"<div class='card'><div class='label'>Closed</div><div class='value'>{lg['closed']}</div></div>"
+        f"<div class='card'><div class='label'>Avg P&L</div><div class='value {lg_avg_cls}'>{lg['avg_pnl']:+}%</div></div>"
+        f"<div class='card'><div class='label'>Total P&L</div><div class='value {lg_tot_cls}'>{lg['total_pnl']:+}%</div></div>"
+        "</div>"
+        f"<div style='margin-top:12px'>{_equity_svg(long_curve)}</div>"
+        "</div>"
+
+        # ---- All-directions reference ----
+        "<div class='panel'>"
+        "<h2>All directions <span class='tag'>— reference (includes shorts the bot won't act on)</span></h2>"
         "<div class='cards'>"
         f"<div class='card'><div class='label'>Win Rate</div><div class='value'>{win_rate}%</div></div>"
         f"<div class='card'><div class='label'>Open</div><div class='value'>{len(open_t)}</div></div>"
@@ -315,20 +423,37 @@ def build():
         f"<div class='card'><div class='label'>Expired</div><div class='value'>{expired}</div></div>"
         f"<div class='card'><div class='label'>Avg P&L</div><div class='value'>{avg}%</div></div>"
         "</div>"
-        "<h2>Run health</h2>"
-        f"{_run_health_html()}"
-        "<h2>Equity curve</h2>"
-        f"{_equity_svg(curve)}"
-        "<h2>Strategy scoreboard</h2>"
-        f"{strat_table}"
-        "<h2>Narrative / sector heat</h2>"
-        f"{sector_table}"
-        "<h2>Health monitor</h2>"
-        f"{health_table}"
-        "<h2>Open trades</h2>"
-        f"{open_table}"
+        f"<div style='margin-top:12px'>{dir_table}</div>"
+        f"<div style='margin-top:12px'>{_equity_svg(curve)}</div>"
+        "</div>"
+
+        # ---- Open trades, split by side ----
+        "<div class='panel'>"
+        f"<h2>Open LONG trades <span class='tag'>({len(open_long)})</span></h2>"
+        f"{open_long_table}"
+        f"<h2 style='margin-top:16px'>Open SHORT trades <span class='tag'>({len(open_short)}) — not acted on</span></h2>"
+        f"{open_short_table}"
+        "</div>"
+
+        # ---- Recent results ----
+        "<div class='panel'>"
         "<h2>Recent results</h2>"
         f"{closed_table}"
+        "</div>"
+
+        # ---- Diagnostics: run health, strategy, sector, coin health ----
+        "<div class='panel'>"
+        "<h2>Run health <span class='tag'>— did each scan succeed</span></h2>"
+        f"{_run_health_html()}"
+        "</div>"
+        "<div class='panel'>"
+        "<h2>Strategy scoreboard</h2>"
+        f"{strat_table}"
+        "<h2 style='margin-top:16px'>Narrative / sector heat</h2>"
+        f"{sector_table}"
+        "<h2 style='margin-top:16px'>Coin health monitor</h2>"
+        f"{health_table}"
+        "</div>"
         "</body></html>"
     )
 

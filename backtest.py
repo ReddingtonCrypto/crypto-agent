@@ -24,6 +24,7 @@ from strategies.smc.range_rotation import detect_range_rotation
 
 # Range-rotation strategy (--range): FRVP sweep-and-reclaim, tested standalone.
 USE_RANGE = "--range" in sys.argv
+LONG_ONLY = "--long-only" in sys.argv
 
 # Money-flow gate now lives in agent.passes_filters (mirrors live). A/B from CLI:
 #   --no-flow      : disable the gate.  --flow-mult=N : tune the surge multiple.
@@ -431,6 +432,10 @@ def backtest_one(coin, timeframe, stats, btc_ctx):
         bias = btc_ctx.bias_at(int(df["timestamp"].iat[i])) if btc_ctx else "BOTH"
 
         for sig in res["signals"]:
+            # --long-only: spot traders only buy; test whether dropping shorts
+            # (a bull-market winner live) actually generalises across regimes.
+            if LONG_ONLY and sig["direction"] != "LONG":
+                continue
             if bias != "BOTH":
                 if sig["direction"] == bias:
                     sig["confidence"] = min(100, sig["confidence"] + 5)
