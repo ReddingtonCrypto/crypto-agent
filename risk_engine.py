@@ -1,4 +1,5 @@
-def calculate_trade(price, direction, atr, strategy="Trend", stop_level=None):
+def calculate_trade(price, direction, atr, strategy="Trend", stop_level=None,
+                    target_level=None):
     """Entry, stop and targets.
 
     If `stop_level` is given (ICT: the swept liquidity level), the stop is
@@ -6,8 +7,21 @@ def calculate_trade(price, direction, atr, strategy="Trend", stop_level=None):
     Otherwise the stop/targets are sized off ATR (volatility):
       - Trend : wider target, let winners run   (stop 2x, TP1 3x, TP2 6x ATR)
       - Range : quicker target, bounded move     (stop 1.5x, TP1 1.5x, TP2 3x ATR)
+
+    CRT (Candle Range Theory) passes BOTH an explicit stop_level (C2's protected
+    extreme) and target_level (C1's body): the stop sits exactly at C2's extreme
+    and the single target is C1's body — no ATR sizing, no partial ladder.
     """
     entry = price
+
+    # ----- CRT: explicit protected stop + C1-body target (single target) -----
+    if strategy == "CRT" and stop_level is not None and target_level is not None:
+        return {
+            "entry": round(entry, 8),
+            "stop": round(float(stop_level), 8),
+            "tp1": round(float(target_level), 8),
+            "tp2": round(float(target_level), 8),
+        }
 
     # ----- Structure-based stop (ICT) -----
     if stop_level is not None:

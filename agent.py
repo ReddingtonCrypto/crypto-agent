@@ -18,6 +18,7 @@ from market_filter import market_quality
 from strategies.smc.market_structure import detect_structure
 from strategies.smc.smc_features import analyze as smc_analyze
 from strategies.smc.ict_model import detect_ict, detect_mss
+from strategies.smc.crt import detect_crt
 from strategies.smc.orderflow import cvd_proxy, cisd, volume_rising
 from strategies.smc.volume_profile import value_area
 
@@ -40,7 +41,16 @@ TIMEFRAMES = [
     ("Swing", "4h"),
     ("Position", "12h"),
     ("Long-term", "1d"),
+    ("Weekly", "1w"),
 ]
+
+# CRT (Candle Range Theory) — deployed as an alerts-only SETUP-MARKER, not an
+# auto-trader. Backtesting found no durable mechanical edge (best on the highest
+# timeframes, breakeven-to-negative overall), so the bot only MARKS Daily/Weekly
+# CRT setups (with-trend, at a key level) for the user to judge + enter manually.
+# Runs in paper alongside ICT; judge on the live dashboard over months.
+ENABLE_CRT = True
+CRT_TFS = {"1d", "1w"}
 
 # Which timeframe must AGREE on direction before a Trend signal is allowed.
 # 1h confirms UP the ladder (don't fight the bigger trend);
@@ -286,11 +296,26 @@ def evaluate(closed, coin, timeframe, horizon):
                 make("MSS", mss["direction"], 80, stop_level=mss["swept"])
             )
 
+    # ----- CRT setup-marker (Daily/Weekly only) — wide C2 stop, C1-body target;
+    #  alerts-only, the human does the LTF entry. -----
+    if ENABLE_CRT and timeframe in CRT_TFS:
+        crt = detect_crt(closed)
+        if crt:
+            sig = make("CRT", crt["direction"], 80, stop_level=crt["stop"])
+            sig["target_level"] = crt["target"]
+            sig["key_level"] = crt["key_level"]
+            result["signals"].append(sig)
+
     return result
 
 
 def passes_filters(s):
     """The rules that decide whether a coin is a tradeable signal."""
+    # CRT is gated inside its own detector (trend + key level + valid CRT), and
+    # it's a Daily/Weekly setup-marker — skip the ICT-oriented vol/VP/flow filters.
+    if s["strategy"] == "CRT":
+        return True
+
     # Common requirements for both strategies.
     if s["confidence"] < 70:
         return False
@@ -485,7 +510,8 @@ def run_agent():
             continue
 
         trade = calculate_trade(
-            s["price"], s["direction"], s["atr"], s["strategy"], s.get("stop_level")
+            s["price"], s["direction"], s["atr"], s["strategy"], s.get("stop_level"),
+            s.get("target_level"),
         )
         # open_trade returns False if a trade for this coin+direction+timeframe+
         # strategy is already open — so the SAME signal never re-fires, but the
@@ -521,7 +547,8 @@ def run_agent():
 
     best = qualified[0]
     trade = calculate_trade(
-        best["price"], best["direction"], best["atr"], best["strategy"], best.get("stop_level")
+        best["price"], best["direction"], best["atr"], best["strategy"],
+        best.get("stop_level"), best.get("target_level"),
     )
 
     print(
@@ -555,6 +582,20 @@ Price: {best['price']}
                 r = (level - entry) / entry * 100 if entry else 0
                 return r if s["direction"] == "LONG" else -r
             action = "🟢 BUY" if s["direction"] == "LONG" else "🔴 SELL"
+
+            if s["strategy"] == "CRT":
+                # Setup-marker: mark the HTF setup, you do the LTF entry + judge.
+                b = [
+                    f"{action}  {s['coin']}   ·   CRT setup",
+                    f"{s['horizon']} ({s['timeframe']}) · at {s.get('key_level','key level')}",
+                    "",
+                    f"📍 CRT zone  {fmt_price(entry)}  (C2 close)",
+                    f"🛑 Invalid   {fmt_price(tr['stop'])}   ({pct(tr['stop']):+.1f}%)  (C2 protected)",
+                    f"🎯 Target    {fmt_price(tr['tp1'])}  ({pct(tr['tp1']):+.1f}%)  (C1 body)",
+                    "🔎 Drop to the LTF for your entry (sweep + CISD) — review before taking.",
+                ]
+                blocks.append("\n".join(b))
+                continue
 
             b = [
                 f"{action}  {s['coin']}   ·   {s['confidence']}%",

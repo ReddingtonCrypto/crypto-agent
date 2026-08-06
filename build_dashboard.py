@@ -21,10 +21,10 @@ OUT_FILE = os.path.join(OUT_DIR, "index.html")
 # each signal is. Backtest: 12h/1d positive, 30m/1h/4h negative.
 TF_TYPE = {
     "30m": "Scalp", "1h": "Day Trade", "4h": "Swing",
-    "12h": "Position", "1d": "Long-term",
+    "12h": "Position", "1d": "Long-term", "1w": "Weekly",
 }
 # Order for the breakdown table (shortest -> longest horizon).
-TF_ORDER = ["30m", "1h", "4h", "12h", "1d"]
+TF_ORDER = ["30m", "1h", "4h", "12h", "1d", "1w"]
 
 
 def _type_of(tf):
