@@ -57,11 +57,23 @@ SWING_LB = 2           # swing lookback (bars each side) for structure/old-h-l
 KL_LOOKBACK = 20       # HTF bars back for the old-high/low sweep + FVG search
 LTF_SWEEP_LB = 20      # LTF bars back that the entry sweep must exceed
 CISD_WINDOW = 4        # LTF bars after the sweep to allow the CISD close (A+ = fast)
-ALIGN_WINDOW = 10      # HTF bars after C2 to keep hunting for the LTF entry
+ALIGN_WINDOW = 3       # HTF bars after C2 to hunt for the LTF entry (anchored,
+                       # not weeks later) — the C3 entry comes right after C2
+TP1_R = 2.0            # partial target in risk-multiples (bank 50%, stop -> BE)
+PARTIAL_FRAC = 0.5     # fraction banked at TP1
 
 LONG_ONLY = "--long-only" in sys.argv
 SHORT_ONLY = "--short-only" in sys.argv
 TBS_ONLY = "--tbs-only" in sys.argv
+PARTIAL = "--no-partial" not in sys.argv   # partial-TP + BE on by default now
+# --retest : after the CISD close, only enter if price RETESTS that close level
+#   within RETEST_WINDOW LTF bars (better price / filters runaway moves).
+RETEST = "--retest" in sys.argv
+RETEST_WINDOW = 6
+# --c2-model : the RISKY C2 entry = single-candle-CISD concept. Enter immediately
+#   at C2's close using the WIDE HTF C2 extreme as the stop (no LTF sweep+CISD
+#   wait). Tested separately per the strategy ("C2 = single-candle CISD").
+C2_MODEL = "--c2-model" in sys.argv
 SPLIT = None
 HISTORY = 8000         # HTF candles
 LTF_HISTORY = 30000    # LTF candles (deep, so walk-forward has coverage)
@@ -84,6 +96,8 @@ for _a in sys.argv:
         KL_TYPES = set(_a.split("=", 1)[1].split(","))
     elif _a.startswith("--pairs="):
         PAIRS = [tuple(p.split(":")) for p in _a.split("=", 1)[1].split(",")]
+    elif _a.startswith("--align-window="):
+        ALIGN_WINDOW = int(_a.split("=", 1)[1])
 
 
 def get_history(coin, timeframe, limit):
@@ -188,13 +202,19 @@ def _has_rejblock(o, h, l, c, i, direction):
         return wick_tests >= 2
 
 
-def _ltf_entry(o, h, l, c, ts, start_idx, end_ts, direction):
+def _ltf_entry(o, h, l, c, ts, start_idx, end_ts, direction, protect):
     """Taught LTF entry: a sweep of a recent LTF extreme, then a SINGLE-CANDLE
     CISD close beyond the sweeping candle's body within CISD_WINDOW bars.
-    Returns (enter_idx, entry, stop, is_tbs) or None."""
+    `protect` = the HTF C2 extreme — if price breaches it before we enter, the
+    CRT is invalidated and we abort. Returns (enter_idx, entry, stop, is_tbs)."""
     n = len(c)
     j = max(start_idx, LTF_SWEEP_LB)
     while j < n - 1 and ts[j] < end_ts:
+        # CRT invalidation: price took out C2's protected extreme -> setup dead.
+        if direction == "SHORT" and h[j] > protect:
+            return None
+        if direction == "LONG" and l[j] < protect:
+            return None
         if direction == "SHORT":
             old_hi = h[j - LTF_SWEEP_LB:j].max()
             if h[j] > old_hi:                                  # swept a recent high
@@ -202,7 +222,12 @@ def _ltf_entry(o, h, l, c, ts, start_idx, end_ts, direction):
                 body_lo = min(o[j], c[j])
                 for k in range(j + 1, min(j + 1 + CISD_WINDOW, n)):
                     if c[k] < body_lo:                         # single-candle CISD down
-                        return k, c[k], h[j], is_tbs
+                        if not RETEST:
+                            return k, c[k], h[j], is_tbs
+                        for m in range(k + 1, min(k + 1 + RETEST_WINDOW, n)):
+                            if h[m] >= c[k]:                   # price retested the close
+                                return m, c[k], h[j], is_tbs
+                        return None                            # no retest -> skip
         else:
             old_lo = l[j - LTF_SWEEP_LB:j].min()
             if l[j] < old_lo:
@@ -210,29 +235,72 @@ def _ltf_entry(o, h, l, c, ts, start_idx, end_ts, direction):
                 body_hi = max(o[j], c[j])
                 for k in range(j + 1, min(j + 1 + CISD_WINDOW, n)):
                     if c[k] > body_hi:
-                        return k, c[k], l[j], is_tbs
+                        if not RETEST:
+                            return k, c[k], l[j], is_tbs
+                        for m in range(k + 1, min(k + 1 + RETEST_WINDOW, n)):
+                            if l[m] <= c[k]:
+                                return m, c[k], l[j], is_tbs
+                        return None
         j += 1
     return None
 
 
+def _leg(entry, px, direction):
+    r = (px - entry) / entry * 100.0
+    return -r if direction == "SHORT" else r
+
+
 def _simulate(highs, lows, closes, i, direction, entry, stop, target):
-    risk_pct = abs(entry - stop) / entry * 100.0 if entry else 0
+    """Partial-TP + move-to-BE (the strategy's exit management):
+      * Bank PARTIAL_FRAC of the position at TP1 = TP1_R risk-multiples, then
+        move the runner's stop to break-even.
+      * Runner exits at the C1-body target, at BE, or the time-stop.
+    With --no-partial it's single-target all-or-nothing (for A/B)."""
+    R = abs(entry - stop)
+    if R == 0 or entry == 0:
+        return "LOSS", -FEE * 200, 0.0
+    risk_pct = R / entry * 100.0
     end = min(len(highs), i + 1 + MAX_HOLD)
+    tp1 = entry + TP1_R * R if direction == "LONG" else entry - TP1_R * R
+    # Only use a partial if TP1 sits BEFORE the final target (else single-target).
+    use_partial = PARTIAL and (
+        (direction == "LONG" and tp1 < target) or
+        (direction == "SHORT" and tp1 > target))
+    cur_stop = stop
+    banked = 0.0
+    tp1_hit = False
+    fees = FEE * (300 if use_partial else 200)   # 3 fills if a partial happens
+
     for k in range(i + 1, end):
         hi, lo = highs[k], lows[k]
-        if direction == "LONG":
-            if lo <= stop:
-                return "LOSS", (stop - entry) / entry * 100 - FEE * 200, risk_pct
-            if hi >= target:
-                return "WIN", (target - entry) / entry * 100 - FEE * 200, risk_pct
-        else:
-            if hi >= stop:
-                return "LOSS", (entry - stop) / entry * 100 - FEE * 200, risk_pct
-            if lo <= target:
-                return "WIN", (entry - target) / entry * 100 - FEE * 200, risk_pct
+        stopped = (lo <= cur_stop) if direction == "LONG" else (hi >= cur_stop)
+        hit_tp1 = (hi >= tp1) if direction == "LONG" else (lo <= tp1)
+        hit_tgt = (hi >= target) if direction == "LONG" else (lo <= target)
+
+        if not tp1_hit:
+            if stopped:                         # full stop before any partial
+                return "LOSS", _leg(entry, cur_stop, direction) - fees, risk_pct
+            if use_partial and hit_tp1:         # bank half, move runner to BE
+                banked = PARTIAL_FRAC * _leg(entry, tp1, direction)
+                cur_stop = entry
+                tp1_hit = True
+                continue
+            if hit_tgt:                         # single-target win (no partial path)
+                return "WIN", _leg(entry, target, direction) - fees, risk_pct
+        else:                                   # runner, stop at BE
+            if stopped:
+                total = banked + PARTIAL_FRAC * _leg(entry, cur_stop, direction) - fees
+                return ("WIN" if total > 0 else "LOSS"), total, risk_pct
+            if hit_tgt:
+                total = banked + PARTIAL_FRAC * _leg(entry, target, direction) - fees
+                return "WIN", total, risk_pct
+
     last = closes[end - 1]
-    g = ((last - entry) if direction == "LONG" else (entry - last)) / entry * 100
-    return "EXPIRED", g - FEE * 200, risk_pct
+    if tp1_hit:
+        total = banked + PARTIAL_FRAC * _leg(entry, last, direction) - fees
+    else:
+        total = _leg(entry, last, direction) - fees
+    return "EXPIRED", total, risk_pct
 
 
 def _blank():
@@ -253,7 +321,9 @@ def backtest_coin(coin):
         elif SPLIT == "last":
             hbars = hbars[len(hbars) // 2:]
         lbars = get_history(coin, ltf, LTF_HISTORY)
-        if len(hbars) < 120 or len(lbars) < 120:
+        # Monthly only has ~90 candles since listing — allow a lower HTF minimum
+        # so Monthly->Daily is testable (LTF still needs a real sample).
+        if len(hbars) < 55 or len(lbars) < 120:
             continue
 
         hdf = pd.DataFrame(hbars, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -305,11 +375,19 @@ def backtest_coin(coin):
             if not lts or t2 < lts[0] or t2 > lts[-1]:
                 continue
             start_idx = bisect.bisect_left(lts, t2)
-            res = _ltf_entry(lo_, lh, ll, lc, lts, start_idx,
-                             t2 + ALIGN_WINDOW * htf_ms, direction)
-            if res is None:
-                continue
-            enter_idx, entry, stop, is_tbs = res
+            protect = hh[i] if direction == "SHORT" else hl[i]   # C2 extreme
+            if C2_MODEL:
+                # RISKY C2 entry: in immediately at C2's close, WIDE stop = C2's
+                # protected extreme (no LTF sweep+CISD wait).
+                if start_idx >= len(lc):
+                    continue
+                enter_idx, entry, stop, is_tbs = start_idx, lc[start_idx], protect, False
+            else:
+                res = _ltf_entry(lo_, lh, ll, lc, lts, start_idx,
+                                 t2 + ALIGN_WINDOW * htf_ms, direction, protect)
+                if res is None:
+                    continue
+                enter_idx, entry, stop, is_tbs = res
             if TBS_ONLY and not is_tbs:
                 continue
             if direction == "LONG" and target <= entry:
@@ -345,6 +423,10 @@ def main():
     if LONG_ONLY: tags.append("long-only")
     if SHORT_ONLY: tags.append("short-only")
     if TBS_ONLY: tags.append("TBS-only")
+    if RETEST: tags.append("retest-entry")
+    if C2_MODEL: tags.append("C2-model(risky)")
+    tags.append(f"exit={'partial+BE' if PARTIAL else 'single-target'}")
+    tags.append(f"align-window={ALIGN_WINDOW}")
     print(f"CRT v2 (aligned) | coins={len(coins)} | pairs={['->'.join(p) for p in PAIRS]}"
           f" | kl={sorted(KL_TYPES)} | split={SPLIT or 'full'} | {tags or ['both']}")
     print(f"HTF hist={HISTORY} LTF hist={LTF_HISTORY} | fee {FEE*200:.1f}% round-trip\n")
