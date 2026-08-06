@@ -41,6 +41,7 @@ rung; 12h/30m are not part of the strategy and are excluded.)
 Run:  python crt_backtest.py --trend --keylevel --history=4000 --top=40 --jobs=4
 """
 
+import bisect
 import json
 import os
 import sys
@@ -64,6 +65,16 @@ USE_TREND = "--trend" in sys.argv
 USE_KEYLEVEL = "--keylevel" in sys.argv
 USE_CONFIRM = "--confirm" in sys.argv
 LONG_ONLY = "--long-only" in sys.argv
+SHORT_ONLY = "--short-only" in sys.argv
+# --align : the taught timeframe-alignment model. Form the CRT (+ trend +
+# key level) on the HIGHER timeframe, then drop to the aligned LOWER timeframe
+# for the entry (a liquidity sweep + single-candle CISD), with a TIGHT stop at
+# the swept LTF extreme and the target still at the HTF C1 body. Taught pairs:
+# Weekly->H4 and Daily->H1.
+ALIGN = "--align" in sys.argv
+ALIGN_PAIRS = [("1w", "4h"), ("1d", "1h")]
+ALIGN_WINDOW = 8      # HTF bars after C2 to keep hunting for the LTF entry
+KL_LTF = 20           # LTF lookback for the entry liquidity sweep
 SPLIT = None
 # CRT-formation timeframes exactly as taught: beginners use Daily and Weekly
 # (the series' recommended charts). H4/H1 are the *entry* timeframes in the
@@ -209,6 +220,8 @@ def backtest_coin(coin):
 
             if LONG_ONLY and direction == "SHORT":
                 continue
+            if SHORT_ONLY and direction == "LONG":
+                continue
 
             # --- Layer: with-trend only ---
             if USE_TREND:
@@ -262,6 +275,115 @@ def backtest_coin(coin):
     return st
 
 
+def _ltf_entry(o, h, l, c, ts, start_idx, end_ts, direction):
+    """Scan LTF bars from start_idx while ts < end_ts for the taught C3 entry:
+    a liquidity sweep of a recent LTF extreme + a single-candle CISD close in
+    the trade direction. Returns (enter_idx, entry, stop) or None."""
+    n = len(c)
+    j = max(start_idx, KL_LTF)
+    while j < n - 1 and ts[j] < end_ts:
+        if direction == "LONG":
+            if l[j] < l[j - KL_LTF:j].min() and c[j + 1] > max(o[j], c[j]):
+                return j + 1, c[j + 1], l[j]        # stop = the swept LTF low
+        else:
+            if h[j] > h[j - KL_LTF:j].max() and c[j + 1] < min(o[j], c[j]):
+                return j + 1, c[j + 1], h[j]        # stop = the swept LTF high
+        j += 1
+    return None
+
+
+def backtest_coin_aligned(coin):
+    """Timeframe-alignment CRT: HTF forms the setup/bias/target, LTF gives the
+    entry + tight stop. Iterates the taught pairs (Weekly->H4, Daily->H1)."""
+    st = {"wins": 0, "losses": 0, "expired": 0, "pnl": 0.0,
+          "win_pnl": 0.0, "loss_pnl": 0.0, "r_sum": 0.0, "n": 0,
+          "bh_pnl": 0.0, "bh_n": 0}
+    pairs = [(htf, ltf) for (htf, ltf) in ALIGN_PAIRS if htf in TIMEFRAMES]
+    for htf, ltf in pairs:
+        hbars = get_history(coin, htf)
+        if len(hbars) > HISTORY:
+            hbars = hbars[-HISTORY:]
+        if SPLIT == "first":
+            hbars = hbars[: len(hbars) // 2]
+        elif SPLIT == "last":
+            hbars = hbars[len(hbars) // 2:]
+        lbars = get_history(coin, ltf)
+        if len(hbars) < 120 or len(lbars) < 120:
+            continue
+
+        hdf = pd.DataFrame(hbars, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        agent.add_indicators(hdf)
+        ho = hdf["open"].to_numpy(); hh = hdf["high"].to_numpy()
+        hl = hdf["low"].to_numpy(); hc = hdf["close"].to_numpy()
+        hts = hdf["timestamp"].to_numpy()
+        htf_ms = EXCHANGE.parse_timeframe(htf) * 1000
+
+        ldf = pd.DataFrame(lbars, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        lo_ = ldf["open"].to_numpy(); lh = ldf["high"].to_numpy()
+        ll = ldf["low"].to_numpy(); lc = ldf["close"].to_numpy()
+        lts = ldf["timestamp"].to_numpy().tolist()
+
+        if hc[-1] > 0 and hc[0] > 0:               # buy-hold benchmark on HTF
+            st["bh_pnl"] += (hc[-1] - hc[0]) / hc[0] * 100.0
+            st["bh_n"] += 1
+
+        start = max(KL_LOOKBACK + 1, 55)
+        for i in range(start, len(hdf) - 1):
+            c1_hi, c1_lo, c1_o, c1_c = hh[i - 1], hl[i - 1], ho[i - 1], hc[i - 1]
+            swept_high = hh[i] > c1_hi
+            swept_low = hl[i] < c1_lo
+            if not (c1_lo <= hc[i] <= c1_hi):
+                continue
+            if swept_high == swept_low:
+                continue
+            direction = "SHORT" if swept_high else "LONG"
+            target = min(c1_o, c1_c) if swept_high else max(c1_o, c1_c)
+
+            if LONG_ONLY and direction == "SHORT":
+                continue
+            if SHORT_ONLY and direction == "LONG":
+                continue
+            if USE_TREND:
+                td = _trend_dir(hdf, i)
+                if td is None or td != direction:
+                    continue
+            if USE_KEYLEVEL:
+                if direction == "SHORT" and hh[i] < hh[i - KL_LOOKBACK:i].max():
+                    continue
+                if direction == "LONG" and hl[i] > hl[i - KL_LOOKBACK:i].min():
+                    continue
+
+            t2 = int(hts[i]) + htf_ms                 # C2 close time
+            if not lts or t2 < lts[0] or t2 > lts[-1]:
+                continue                              # no LTF coverage here
+            start_idx = bisect.bisect_left(lts, t2)
+            end_ts = t2 + ALIGN_WINDOW * htf_ms
+            res = _ltf_entry(lo_, lh, ll, lc, lts, start_idx, end_ts, direction)
+            if res is None:
+                continue
+            enter_idx, entry, stop = res
+            if direction == "LONG" and target <= entry:
+                continue
+            if direction == "SHORT" and target >= entry:
+                continue
+
+            result, pnl, risk = _simulate(lh, ll, lc, enter_idx, direction, entry, stop, target)
+            st["n"] += 1
+            st["pnl"] += pnl
+            st["r_sum"] += pnl / risk if risk else 0.0
+            if result == "WIN":
+                st["wins"] += 1; st["win_pnl"] += pnl
+            elif result == "LOSS":
+                st["losses"] += 1; st["loss_pnl"] += pnl
+            else:
+                st["expired"] += 1
+                if pnl > 0:
+                    st["win_pnl"] += pnl
+                else:
+                    st["loss_pnl"] += pnl
+    return st
+
+
 def main():
     try:
         coins = universe.get_universe(EXCHANGE, 100)[:TOP_N]
@@ -275,7 +397,10 @@ def main():
     if USE_KEYLEVEL: layers.append("keylevel")
     if USE_CONFIRM: layers.append("C3-confirm")
     if LONG_ONLY: layers.append("long-only")
-    print(f"CRT backtest | coins={len(coins)} | tfs={TIMEFRAMES} | history={HISTORY}"
+    if SHORT_ONLY: layers.append("short-only")
+    coin_fn = backtest_coin_aligned if ALIGN else backtest_coin
+    mode = f"ALIGNED {[f'{h}->{l}' for h, l in ALIGN_PAIRS if h in TIMEFRAMES]}" if ALIGN else f"single-TF {TIMEFRAMES}"
+    print(f"CRT backtest | coins={len(coins)} | mode={mode} | history={HISTORY}"
           f" | split={SPLIT or 'full'} | layers={layers or ['BASE']}")
     print(f"Fee modelled: {FEE*200:.1f}% round-trip\n")
 
@@ -290,12 +415,12 @@ def main():
     if JOBS > 1 and len(coins) > 1:
         import multiprocessing as mp
         with mp.Pool(min(JOBS, len(coins))) as pool:
-            for st in pool.imap_unordered(backtest_coin, coins):
+            for st in pool.imap_unordered(coin_fn, coins):
                 merge(total, st)
     else:
         for coin in coins:
             try:
-                merge(total, backtest_coin(coin))
+                merge(total, coin_fn(coin))
             except Exception as e:
                 print(f"  skip {coin}: {type(e).__name__}: {e}")
 
