@@ -56,12 +56,9 @@ MAX_OPEN_PER_DIRECTION = 14     # of those, how many may be the same side
 
 ENABLE_TREND = False            # old EMA Trend strategy off (backtest: net loser)
 ENABLE_MSS = False              # standalone MSS off (backtest: ~break-even +0.04%); ICT (sweep+MSS+FVG) is the edge
-# Trend-following (dualcross 20/100 SMA) — strategy-lab winner. Multi-TF
-# validation (36-44 coins): works on 4h/12h/1d (beats buy-hold RISK-ADJUSTED,
-# recent-half positive), but FAILS on 1h/30m (too noisy for a 20/100 cross). So
-# only fire TrendMA on the higher timeframes where it's validated.
-ENABLE_TREND_MA = True
-TREND_MA_TFS = {"4h", "12h", "1d"}
+# NOTE: the trend-following "TrendMA" (dualcross 20/100 SMA) strategy was REMOVED
+# 2026-08-06 — the lab's risk-adjusted "edge" never showed up in live paper
+# trading (12 trades, one -32.9% blow-up on a too-wide stop); pulled entirely.
 UNIVERSE_SIZE = 40              # top N by mcap. Widened 20->40: with Variant C exits + VP,
                                 # the wide universe backtests POSITIVE (+1.28/trade) — the old
                                 # "alts crush the edge" was a pre-VariantC/pre-VP artifact.
@@ -141,10 +138,6 @@ def add_indicators(df):
 
     df["ATR"] = (df.high - df.low).rolling(14).mean()
     df["VOL_SMA"] = df.volume.rolling(20).mean()
-
-    # Trend-following MAs (dualcross 20/100) — the strategy-lab winner.
-    df["SMA_FAST"] = df.close.rolling(20).mean()
-    df["SMA_SLOW"] = df.close.rolling(100).mean()
     return df
 
 
@@ -293,23 +286,11 @@ def evaluate(closed, coin, timeframe, horizon):
                 make("MSS", mss["direction"], 80, stop_level=mss["swept"])
             )
 
-    # ----- Trend-following (dualcross 20/100 SMA) — LONG while uptrend -----
-    ma_up = bool(pd.notna(latest.SMA_FAST) and pd.notna(latest.SMA_SLOW)
-                 and latest.SMA_FAST > latest.SMA_SLOW)
-    result["ma_uptrend"] = ma_up
-    if ENABLE_TREND_MA and ma_up and timeframe in TREND_MA_TFS:
-        result["signals"].append(make("TrendMA", "LONG", 80))
-
     return result
 
 
 def passes_filters(s):
     """The rules that decide whether a coin is a tradeable signal."""
-    # Trend-following: the MA trend IS the signal; skip the ICT-oriented filters
-    # (VP/flow/volume-surge don't apply). Exit is the trend flip, not a TP.
-    if s["strategy"] == "TrendMA":
-        return True
-
     # Common requirements for both strategies.
     if s["confidence"] < 70:
         return False
@@ -415,7 +396,6 @@ def run_agent():
 
     signals = []
     bar_map = {}
-    trend_flipped = set()   # (coin, tf) where the MA trend turned down -> exit TrendMA
     for coin in coins:
         # Analyse every timeframe for this coin first (so we have the
         # confirmation timeframe's direction on hand).
@@ -430,8 +410,6 @@ def run_agent():
                     bar_map.setdefault(coin, {
                         "high": r["high"], "low": r["low"], "price": r["price"],
                     })
-                    if not r.get("ma_uptrend", True):
-                        trend_flipped.add((coin, tf))
             except Exception as e:
                 print(f"Error scanning {coin} {tf}: {type(e).__name__}: {e}")
 
@@ -455,7 +433,7 @@ def run_agent():
 
     # 1) Advance paper trades (partial-exit plan); ping Telegram for each event
     #    — a partial bank at TP1, or a full close (WIN/LOSS/EXPIRED).
-    for t in paper_trading.update_open_trades(bar_map, trend_flipped):
+    for t in paper_trading.update_open_trades(bar_map):
         mark = t["result"]
         emoji = {"WIN": "✅", "LOSS": "❌", "EXPIRED": "⌛", "TP1": "🎯"}.get(mark, "❌")
         tf = t.get("timeframe", "")
@@ -577,28 +555,22 @@ Price: {best['price']}
                 r = (level - entry) / entry * 100 if entry else 0
                 return r if s["direction"] == "LONG" else -r
             action = "🟢 BUY" if s["direction"] == "LONG" else "🔴 SELL"
-            strat_name = "Trend-following" if s["strategy"] == "TrendMA" else s["strategy"]
 
             b = [
                 f"{action}  {s['coin']}   ·   {s['confidence']}%",
-                f"{s['horizon']} ({s['timeframe']}) · {strat_name}",
+                f"{s['horizon']} ({s['timeframe']}) · {s['strategy']}",
                 "",
                 f"💵 Entry   {fmt_price(entry)}",
                 f"🛑 Stop    {fmt_price(tr['stop'])}   ({pct(tr['stop']):+.1f}%)",
+                f"🎯 Target  {fmt_price(tr['tp1'])}  ({pct(tr['tp1']):+.1f}%)"
+                f"  then  {fmt_price(tr['tp2'])}  ({pct(tr['tp2']):+.1f}%)",
             ]
-            if s["strategy"] == "TrendMA":
-                b.append("🔄 Exit    when the trend flips (MA cross down)")
-            else:
-                b.append(
-                    f"🎯 Target  {fmt_price(tr['tp1'])}  ({pct(tr['tp1']):+.1f}%)"
-                    f"  then  {fmt_price(tr['tp2'])}  ({pct(tr['tp2']):+.1f}%)"
-                )
-                feats = s.get("smc_features") or []
-                if s.get("smc", "-") != "-":
-                    feats = [s["smc"]] + feats
-                if feats:
-                    plain = [f"• {_plain(t)}" for t in feats[:3]]
-                    b.append("📋 Why it fired:\n   " + "\n   ".join(plain))
+            feats = s.get("smc_features") or []
+            if s.get("smc", "-") != "-":
+                feats = [s["smc"]] + feats
+            if feats:
+                plain = [f"• {_plain(t)}" for t in feats[:3]]
+                b.append("📋 Why it fired:\n   " + "\n   ".join(plain))
             blocks.append("\n".join(b))
 
         header = f"⚡ {len(new_alerts)} NEW SIGNAL{'S' if len(new_alerts) > 1 else ''}"

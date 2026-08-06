@@ -358,12 +358,7 @@ def build():
             return '<div class="empty">None open right now.</div>'
         def row(r):
             dircell = f"<td>{_dir_span(r['direction'])}</td>" if with_dir else ""
-            # Trend-following exits on the MA trend flip, not a fixed TP — show
-            # that instead of the (unused, misleading) TP levels.
-            if r["strategy"] == "TrendMA":
-                tp_cells = "<td colspan='2'><i>exit on trend-flip</i></td>"
-            else:
-                tp_cells = f"<td>{fmt_price(r['tp1'])}</td><td>{fmt_price(r['tp2'])}</td>"
+            tp_cells = f"<td>{fmt_price(r['tp1'])}</td><td>{fmt_price(r['tp2'])}</td>"
             return (
                 f"<tr><td>{r['coin']}{' 🎯' if r['tp1_hit'] else ''}</td>{dircell}"
                 f"<td>{_type_of(r['timeframe'])}</td><td>{r['timeframe'] or '-'}</td>"
@@ -465,7 +460,7 @@ def build():
         f"{long_panel}{short_panel}"
         "</div>"
 
-        # 3) Strategy scoreboard (ICT vs TrendMA vs …) + trade-type breakdown
+        # 3) Strategy scoreboard + trade-type breakdown
         "<div class='panel'>"
         "<h2>Strategies</h2>"
         f"{strat_table}"
