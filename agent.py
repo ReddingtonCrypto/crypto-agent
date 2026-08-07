@@ -18,7 +18,7 @@ from market_filter import market_quality
 from strategies.smc.market_structure import detect_structure
 from strategies.smc.smc_features import analyze as smc_analyze
 from strategies.smc.ict_model import detect_ict, detect_mss
-from strategies.smc.crt import detect_crt
+from strategies.smc.crt import detect_crt_aligned
 from strategies.smc.orderflow import cvd_proxy, cisd, volume_rising
 from strategies.smc.volume_profile import value_area
 
@@ -44,13 +44,14 @@ TIMEFRAMES = [
     ("Weekly", "1w"),
 ]
 
-# CRT (Candle Range Theory) — deployed as an alerts-only SETUP-MARKER, not an
-# auto-trader. Backtesting found no durable mechanical edge (best on the highest
-# timeframes, breakeven-to-negative overall), so the bot only MARKS Daily/Weekly
-# CRT setups (with-trend, at a key level) for the user to judge + enter manually.
-# Runs in paper alongside ICT; judge on the live dashboard over months.
+# CRT (Candle Range Theory) — FAITHFUL timeframe-aligned model: mark the CRT +
+# key level on the HIGHER timeframe, take the entry (sweep + single-candle CISD)
+# on the aligned LOWER timeframe, SL beyond the swept LTF extreme, TP = C1 body.
+# Beginner-recommended pairs only (the doc says master these before the risky
+# sub-daily ones). Backtesting found no durable mechanical edge — this runs in
+# PAPER as an honest forward-test alongside ICT; judge on the dashboard.
 ENABLE_CRT = True
-CRT_TFS = {"1d", "1w"}
+CRT_PAIRS = [("1M", "1d"), ("1w", "4h"), ("1d", "1h")]  # HTF -> LTF (entry)
 
 # Which timeframe must AGREE on direction before a Trend signal is allowed.
 # 1h confirms UP the ladder (don't fight the bigger trend);
@@ -166,6 +167,20 @@ def analyze_tf(coin, timeframe, horizon):
     if len(closed) < 55:
         return None
     return evaluate(closed, coin, timeframe, horizon)
+
+
+def _closed_df(coin, tf, per_tf):
+    """Closed candles for a timeframe — reuse the main scan's fetch when the TF
+    was already analysed, else fetch it (e.g. Monthly for the 1M->1d pair)."""
+    r = per_tf.get(tf)
+    if r is not None and r.get("df") is not None:
+        return r["df"]
+    candles = fetch_candles(coin, tf)
+    if not candles or len(candles) < 35:
+        return None
+    return pd.DataFrame(
+        candles, columns=["timestamp", "open", "high", "low", "close", "volume"]
+    ).iloc[:-1]
 
 
 def evaluate(closed, coin, timeframe, horizon):
@@ -296,15 +311,9 @@ def evaluate(closed, coin, timeframe, horizon):
                 make("MSS", mss["direction"], 80, stop_level=mss["swept"])
             )
 
-    # ----- CRT setup-marker (Daily/Weekly only) — wide C2 stop, C1-body target;
-    #  alerts-only, the human does the LTF entry. -----
-    if ENABLE_CRT and timeframe in CRT_TFS:
-        crt = detect_crt(closed)
-        if crt:
-            sig = make("CRT", crt["direction"], 80, stop_level=crt["stop"])
-            sig["target_level"] = crt["target"]
-            sig["key_level"] = crt["key_level"]
-            result["signals"].append(sig)
+    # CRT runs as a timeframe-aligned pass in run_agent (needs HTF+LTF candles),
+    # so stash the closed candles here for it to reuse (no extra fetches).
+    result["df"] = closed
 
     return result
 
@@ -452,6 +461,31 @@ def run_agent():
                     sig["confirm"] = f"{ctf} agrees"
                 signals.append(sig)
 
+        # ----- CRT timeframe-aligned pass: HTF marks the setup, the aligned LTF
+        #  executes (sweep + single-candle CISD). One signal per fresh trigger. -----
+        if ENABLE_CRT:
+            for htf, ltf in CRT_PAIRS:
+                try:
+                    htf_df = _closed_df(coin, htf, per_tf)
+                    ltf_df = _closed_df(coin, ltf, per_tf)
+                    if htf_df is None or ltf_df is None:
+                        continue
+                    crt = detect_crt_aligned(htf_df, ltf_df)
+                    if not crt:
+                        continue
+                    signals.append({
+                        "coin": coin, "timeframe": ltf, "horizon": f"{htf}→{ltf}",
+                        "strategy": "CRT", "direction": crt["direction"],
+                        "confidence": 80, "price": crt["entry"], "atr": 0.0,
+                        "stop_level": crt["stop"], "target_level": crt["target"],
+                        "key_level": crt["key_level"], "htf": htf, "ltf": ltf,
+                        # defaults so shared print/alert paths don't KeyError
+                        "regime": "-", "quality": "STRONG", "rsi": 0.0,
+                        "vol_confirm": True, "smc": "-", "smc_features": [],
+                    })
+                except Exception as e:
+                    print(f"Error CRT {coin} {htf}->{ltf}: {type(e).__name__}: {e}")
+
     if not bar_map:
         print("No data collected")
         return
@@ -584,15 +618,15 @@ Price: {best['price']}
             action = "🟢 BUY" if s["direction"] == "LONG" else "🔴 SELL"
 
             if s["strategy"] == "CRT":
-                # Setup-marker: mark the HTF setup, you do the LTF entry + judge.
+                # Timeframe-aligned entry: HTF marked the setup, LTF triggered it.
                 b = [
-                    f"{action}  {s['coin']}   ·   CRT setup",
-                    f"{s['horizon']} ({s['timeframe']}) · at {s.get('key_level','key level')}",
+                    f"{action}  {s['coin']}   ·   CRT {s['horizon']}",
+                    f"Entry on {s.get('ltf', s['timeframe'])} · HTF setup at {s.get('key_level','key level')}",
                     "",
-                    f"📍 CRT zone  {fmt_price(entry)}  (C2 close)",
-                    f"🛑 Invalid   {fmt_price(tr['stop'])}   ({pct(tr['stop']):+.1f}%)  (C2 protected)",
-                    f"🎯 Target    {fmt_price(tr['tp1'])}  ({pct(tr['tp1']):+.1f}%)  (C1 body)",
-                    "🔎 Drop to the LTF for your entry (sweep + CISD) — review before taking.",
+                    f"💵 Entry   {fmt_price(entry)}  (LTF sweep + CISD)",
+                    f"🛑 SL      {fmt_price(tr['stop'])}   ({pct(tr['stop']):+.1f}%)  (beyond swept extreme)",
+                    f"🎯 TP      {fmt_price(tr['tp1'])}  ({pct(tr['tp1']):+.1f}%)  (C1 body)",
+                    "🔎 Review before taking — CRT is paper/unproven.",
                 ]
                 blocks.append("\n".join(b))
                 continue
