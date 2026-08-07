@@ -71,6 +71,13 @@ PARTIAL = "--no-partial" not in sys.argv   # partial-TP + BE on by default now
 #   within RETEST_WINDOW LTF bars (better price / filters runaway moves).
 RETEST = "--retest" in sys.argv
 RETEST_WINDOW = 6
+# --ote : the group's "retest into the discounted zone" entry. After the sweep+
+# CISD confirms the impulse, don't chase the close — place a limit at the
+# 0.705-0.786 fib retracement of the impulse (OTE_FIB) and only fill on the
+# pullback. Deeper entry -> tighter stop -> bigger R:R. Misses runaways.
+OTE = "--ote" in sys.argv
+OTE_FIB = 0.75          # entry inside the 0.705-0.786 discount/premium zone
+OTE_WINDOW = 10         # LTF bars to wait for the pullback to fill
 # --c2-model : the RISKY C2 entry = single-candle-CISD concept. Enter immediately
 #   at C2's close using the WIDE HTF C2 extreme as the stop (no LTF sweep+CISD
 #   wait). Tested separately per the strategy ("C2 = single-candle CISD").
@@ -235,6 +242,15 @@ def _ltf_entry(o, h, l, c, ts, start_idx, end_ts, direction, protect):
                 body_lo = min(o[j], c[j])
                 for k in range(j + 1, min(j + 1 + CISD_WINDOW, n)):
                     if c[k] < body_lo:                         # single-candle CISD down
+                        if OTE:                                # discount retrace entry
+                            imp_lo = l[j:k + 1].min()
+                            entry_px = imp_lo + (h[j] - imp_lo) * OTE_FIB
+                            for m in range(k + 1, min(k + 1 + OTE_WINDOW, n)):
+                                if h[m] > h[j]:                # invalidated before fill
+                                    return None
+                                if h[m] >= entry_px:           # pullback filled the limit
+                                    return m, entry_px, h[j], is_tbs
+                            return None
                         if not RETEST:
                             return k, c[k], h[j], is_tbs
                         for m in range(k + 1, min(k + 1 + RETEST_WINDOW, n)):
@@ -248,6 +264,15 @@ def _ltf_entry(o, h, l, c, ts, start_idx, end_ts, direction, protect):
                 body_hi = max(o[j], c[j])
                 for k in range(j + 1, min(j + 1 + CISD_WINDOW, n)):
                     if c[k] > body_hi:
+                        if OTE:                                # discount retrace entry
+                            imp_hi = h[j:k + 1].max()
+                            entry_px = imp_hi - (imp_hi - l[j]) * OTE_FIB
+                            for m in range(k + 1, min(k + 1 + OTE_WINDOW, n)):
+                                if l[m] < l[j]:                # invalidated before fill
+                                    return None
+                                if l[m] <= entry_px:           # pullback filled the limit
+                                    return m, entry_px, l[j], is_tbs
+                            return None
                         if not RETEST:
                             return k, c[k], l[j], is_tbs
                         for m in range(k + 1, min(k + 1 + RETEST_WINDOW, n)):
