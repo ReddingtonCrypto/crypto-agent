@@ -46,6 +46,7 @@ import pandas as pd
 import universe
 from data_source import make_exchange
 from strategies.smc.market_structure import find_swings
+from strategies.smc import key_levels
 
 EXCHANGE = make_exchange()
 CACHE_DIR = "data/bt_cache"
@@ -359,15 +360,9 @@ def backtest_coin(coin):
             if _trend_at(hi_sw, lo_sw, i) != direction:
                 continue
 
-            # --- HTF key level (>=1 enabled type) ---
-            at_kl = False
-            if "oldhl" in KL_TYPES and _old_level(hi_sw, lo_sw, i, direction, hh, hl, hc) is not None:
-                at_kl = True
-            if not at_kl and "fvg" in KL_TYPES and _has_fvg(ho, hh, hl, hc, i, direction):
-                at_kl = True
-            if not at_kl and "rejblock" in KL_TYPES and _has_rejblock(ho, hh, hl, hc, i, direction):
-                at_kl = True
-            if not at_kl:
+            # --- HTF key level (careful, separate detectors from key_levels) ---
+            if not key_levels.at_key_level(hdf, i, direction, types=tuple(KL_TYPES),
+                                           swings=(hi_sw, lo_sw)):
                 continue
 
             # --- drop to aligned LTF for the entry ---
