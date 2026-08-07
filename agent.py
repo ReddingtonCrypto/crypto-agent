@@ -50,8 +50,14 @@ TIMEFRAMES = [
 # Beginner-recommended pairs only (the doc says master these before the risky
 # sub-daily ones). Backtesting found no durable mechanical edge — this runs in
 # PAPER as an honest forward-test alongside ICT; judge on the dashboard.
+# A+ SCANNER: surfaces only high-quality CRT setups where MULTIPLE key levels
+# stack (confluence), across ALL the higher timeframes, for the user to judge
+# and enter manually. Backtesting found no mechanical edge — the value is a
+# clean, filtered feed of the best setups; the human applies the judgement.
 ENABLE_CRT = True
-CRT_PAIRS = [("1M", "1d"), ("1w", "4h"), ("1d", "1h")]  # HTF -> LTF (entry)
+CRT_MIN_CONFLUENCE = 2   # require >=2 key levels stacking (A+ only)
+CRT_PAIRS = [("1M", "1d"), ("1w", "4h"), ("1d", "1h"),
+             ("4h", "15m"), ("1h", "5m")]  # every HTF -> its aligned entry TF
 
 # Which timeframe must AGREE on direction before a Trend signal is allowed.
 # 1h confirms UP the ladder (don't fight the bigger trend);
@@ -470,7 +476,8 @@ def run_agent():
                     ltf_df = _closed_df(coin, ltf, per_tf)
                     if htf_df is None or ltf_df is None:
                         continue
-                    crt = detect_crt_aligned(htf_df, ltf_df)
+                    crt = detect_crt_aligned(htf_df, ltf_df,
+                                             min_confluence=CRT_MIN_CONFLUENCE)
                     if not crt:
                         continue
                     signals.append({
@@ -618,15 +625,31 @@ Price: {best['price']}
             action = "🟢 BUY" if s["direction"] == "LONG" else "🔴 SELL"
 
             if s["strategy"] == "CRT":
-                # Timeframe-aligned entry: HTF marked the setup, LTF triggered it.
+                # A+ scanner card — plain English, percentages (no R:R ratios).
+                TFN = {"1M": "Monthly", "1w": "Weekly", "1d": "Daily", "4h": "4-hour",
+                       "1h": "1-hour", "15m": "15-min", "5m": "5-min",
+                       "12h": "12-hour", "30m": "30-min"}
+                htf = TFN.get(s.get("htf", ""), s.get("htf", ""))
+                ltf = TFN.get(s.get("ltf", ""), TFN.get(s["timeframe"], s["timeframe"]))
+                tp, sl = tr["tp1"], tr["stop"]
+                rwd, rsk = abs(pct(tp)), abs(pct(sl))
+                side = "🟢 BUY (long)" if s["direction"] == "LONG" else "🔴 SELL (short)"
+                trap = ("swept an old low then reversed up" if s["direction"] == "LONG"
+                        else "swept an old high then reversed down")
                 b = [
-                    f"{action}  {s['coin']}   ·   CRT {s['horizon']}",
-                    f"Entry on {s.get('ltf', s['timeframe'])} · HTF setup at {s.get('key_level','key level')}",
+                    f"⭐ A+ CRT SETUP — {s['coin']}",
+                    f"{htf} setup · entry timed on the {ltf} chart",
+                    f"Confluence: {s.get('key_level', 'key levels')}",
                     "",
-                    f"💵 Entry   {fmt_price(entry)}  (LTF sweep + CISD)",
-                    f"🛑 SL      {fmt_price(tr['stop'])}   ({pct(tr['stop']):+.1f}%)  (beyond swept extreme)",
-                    f"🎯 TP      {fmt_price(tr['tp1'])}  ({pct(tr['tp1']):+.1f}%)  (C1 body)",
-                    "🔎 Review before taking — CRT is paper/unproven.",
+                    f"{side}",
+                    f"💵 Entry price   {fmt_price(entry)}",
+                    f"🎯 Take profit   {fmt_price(tp)}   (+{rwd:.1f}%)",
+                    f"🛑 Stop loss     {fmt_price(sl)}   (-{rsk:.1f}%)",
+                    f"⚖️ Potential gain +{rwd:.1f}%  vs  risk -{rsk:.1f}%",
+                    "",
+                    f"Why: price {trap} (a liquidity grab), with {s.get('key_level','key levels')}",
+                    "lining up — now expected to run to the take-profit.",
+                    "📝 Best-setup scanner (paper) — your call; check the chart before taking.",
                 ]
                 blocks.append("\n".join(b))
                 continue

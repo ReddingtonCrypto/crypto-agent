@@ -18,6 +18,7 @@ C1. Returns {direction, stop, target, key_level} or None.
 """
 
 from strategies.smc.market_structure import find_swings
+from strategies.smc import key_levels
 
 KL_LOOKBACK = 20   # bars back a sweep must exceed to count as an "old high/low"
 
@@ -105,7 +106,8 @@ def _at_key_level(df, i, direction, kl_lookback):
 
 
 def detect_crt_aligned(htf_df, ltf_df, kl_lookback=KL_LOOKBACK,
-                       align_window=3, ltf_sweep_lb=20, cisd_window=4):
+                       align_window=3, ltf_sweep_lb=20, cisd_window=4,
+                       min_confluence=1):
     """FAITHFUL timeframe-aligned entry (HTF forms the setup, LTF executes).
 
     Finds the most recent valid HTF CRT (within `align_window` HTF bars, with-
@@ -113,6 +115,10 @@ def detect_crt_aligned(htf_df, ltf_df, kl_lookback=KL_LOOKBACK,
     of a recent extreme + a single-candle CISD close. Fires ONLY when that entry
     confirms on the LAST CLOSED LTF candle (a fresh trigger, so live open-dedup
     opens it exactly once).
+
+    `min_confluence` = how many key levels must STACK (the A+ quality filter):
+    1 = any single key level, 2 = an A+ setup where two line up, etc. Uses the
+    careful detectors in key_levels.py (old-high/low, FVG, rejection block).
 
     SL = just beyond the swept LTF extreme (per the doc's C3 entry). TP = the
     HTF C1 body. Returns {direction, entry, stop, target, key_level} or None.
@@ -141,9 +147,11 @@ def detect_crt_aligned(htf_df, ltf_df, kl_lookback=KL_LOOKBACK,
             continue
         if trend != direction:
             continue
-        key = _at_key_level(htf_df, i, direction, kl_lookback)
-        if key is None:
+        cnt, labels = key_levels.count_key_levels(
+            htf_df, i, direction, swings=(highs, lows))
+        if cnt < min_confluence:
             continue
+        key = " + ".join(labels)
         htf_ms = int(ts[i] - ts[i - 1])
         setup = (i, direction, protect, target, key, htf_ms)
         break
