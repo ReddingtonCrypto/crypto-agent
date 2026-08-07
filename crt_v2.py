@@ -75,6 +75,14 @@ RETEST_WINDOW = 6
 #   at C2's close using the WIDE HTF C2 extreme as the stop (no LTF sweep+CISD
 #   wait). Tested separately per the strategy ("C2 = single-candle CISD").
 C2_MODEL = "--c2-model" in sys.argv
+# --confluence=N : require at least N key levels stacking (A+ quality filter).
+# 1 = any single key level (default). 2/3 = only take setups where multiple
+# confluences line up — the "quality over quantity" selection.
+CONFLUENCE_MIN = 1
+# --target-r=N : override the C1-body target with an N-risk-multiple target
+# (0 = use C1 body, the default). Tests whether riding to a bigger target
+# (e.g. 3R/5R, "run to the next liquidity pool") beats the small C1 body.
+TARGET_R = 0.0
 SPLIT = None
 HISTORY = 8000         # HTF candles
 LTF_HISTORY = 30000    # LTF candles (deep, so walk-forward has coverage)
@@ -99,6 +107,10 @@ for _a in sys.argv:
         PAIRS = [tuple(p.split(":")) for p in _a.split("=", 1)[1].split(",")]
     elif _a.startswith("--align-window="):
         ALIGN_WINDOW = int(_a.split("=", 1)[1])
+    elif _a.startswith("--confluence="):
+        CONFLUENCE_MIN = int(_a.split("=", 1)[1])
+    elif _a.startswith("--target-r="):
+        TARGET_R = float(_a.split("=", 1)[1])
 
 
 def get_history(coin, timeframe, limit):
@@ -360,9 +372,10 @@ def backtest_coin(coin):
             if _trend_at(hi_sw, lo_sw, i) != direction:
                 continue
 
-            # --- HTF key level (careful, separate detectors from key_levels) ---
-            if not key_levels.at_key_level(hdf, i, direction, types=tuple(KL_TYPES),
-                                           swings=(hi_sw, lo_sw)):
+            # --- HTF key level(s) — require CONFLUENCE_MIN stacking (A+ filter) ---
+            kl_count, _kl_labels = key_levels.count_key_levels(
+                hdf, i, direction, types=tuple(KL_TYPES), swings=(hi_sw, lo_sw))
+            if kl_count < CONFLUENCE_MIN:
                 continue
 
             # --- drop to aligned LTF for the entry ---
@@ -385,12 +398,20 @@ def backtest_coin(coin):
                 enter_idx, entry, stop, is_tbs = res
             if TBS_ONLY and not is_tbs:
                 continue
-            if direction == "LONG" and target <= entry:
+
+            # --target-r=N : ride to N risk-multiples instead of the small C1
+            #  body (tests the big-R "run to next liquidity" idea).
+            tgt = target
+            if TARGET_R:
+                R = abs(entry - stop)
+                tgt = entry + TARGET_R * R if direction == "LONG" else entry - TARGET_R * R
+
+            if direction == "LONG" and tgt <= entry:
                 continue
-            if direction == "SHORT" and target >= entry:
+            if direction == "SHORT" and tgt >= entry:
                 continue
 
-            result, pnl, risk = _simulate(lh, ll, lc, enter_idx, direction, entry, stop, target)
+            result, pnl, risk = _simulate(lh, ll, lc, enter_idx, direction, entry, stop, tgt)
             st["n"] += 1
             st["pnl"] += pnl
             if is_tbs:

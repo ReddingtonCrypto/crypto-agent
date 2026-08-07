@@ -181,3 +181,17 @@ def at_key_level(df, i, direction, types=("oldhl", "fvg", "rejblock"), swings=No
     if "rejblock" in types and at_rejection_block(df, i, direction, swings=swings):
         return "rejection block"
     return None
+
+
+def count_key_levels(df, i, direction, types=("oldhl", "fvg", "rejblock"), swings=None):
+    """How many of the enabled key levels are present at once — the 'confluence'
+    that separates an A+ setup (several stacking) from a marginal one (just one).
+    Returns (count, labels)."""
+    labels = []
+    if "oldhl" in types and at_old_high_low(df, i, direction, swings=swings):
+        labels.append("old high/low")
+    if "fvg" in types and at_fvg(df, i, direction):
+        labels.append("FVG")
+    if "rejblock" in types and at_rejection_block(df, i, direction, swings=swings):
+        labels.append("rejection block")
+    return len(labels), labels
