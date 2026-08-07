@@ -112,37 +112,9 @@ def update_open_trades(bars):
         hi, lo = bar["high"], bar["low"]
         realized_pct = realized_pct or 0.0
 
-        # ---- CRT: single fixed target (C1 body) vs the C2 protected stop —
-        #      no Variant C partials (it's a different exit model). ----
-        if strategy == "CRT":
-            exit_price = None
-            if direction == "LONG":
-                if lo <= stop:
-                    exit_price = stop
-                elif hi >= tp1:
-                    exit_price = tp1
-            else:
-                if hi >= stop:
-                    exit_price = stop
-                elif lo <= tp1:
-                    exit_price = tp1
-            if exit_price is None and _expired(opened_at, timeframe):
-                exit_price = bar["price"]
-                res = "EXPIRED"
-            elif exit_price is not None:
-                pnl0 = _leg(entry, exit_price, direction)
-                res = "WIN" if pnl0 > 0 else "LOSS"
-            if exit_price is not None:
-                pnl = round(_leg(entry, exit_price, direction), 2)
-                conn.execute(
-                    "UPDATE paper_trades SET status=?, closed_at=?, exit_price=?, pnl_pct=? WHERE id=?",
-                    (res, _now(), exit_price, pnl, tid),
-                )
-                events.append({
-                    "coin": coin, "direction": direction, "result": res,
-                    "pnl_pct": pnl, "timeframe": timeframe, "strategy": strategy,
-                })
-            continue
+        # CRT now uses the same partial-exit plan as ICT (bank 50% at TP1 = 2R,
+        # move the runner's stop to break-even, runner to the C1-body target) —
+        # the group's exact risk management — so it flows through the path below.
 
         # ---- Phase 1: partial not yet banked ----
         if not tp1_hit:

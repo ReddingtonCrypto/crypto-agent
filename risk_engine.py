@@ -14,13 +14,21 @@ def calculate_trade(price, direction, atr, strategy="Trend", stop_level=None,
     """
     entry = price
 
-    # ----- CRT: explicit protected stop + C1-body target (single target) -----
+    # ----- CRT: OTE stop + the group's risk management (bank 50% at 2R, move
+    #  SL to break-even, let the runner go to the C1-body target). -----
     if strategy == "CRT" and stop_level is not None and target_level is not None:
+        stop = float(stop_level)
+        tgt = float(target_level)
+        risk = abs(entry - stop)
+        if direction == "LONG":
+            tp1 = min(entry + 2 * risk, tgt)   # 2R partial (or the body if nearer)
+        else:
+            tp1 = max(entry - 2 * risk, tgt)
         return {
             "entry": round(entry, 8),
-            "stop": round(float(stop_level), 8),
-            "tp1": round(float(target_level), 8),
-            "tp2": round(float(target_level), 8),
+            "stop": round(stop, 8),
+            "tp1": round(tp1, 8),      # partial target (2R)
+            "tp2": round(tgt, 8),      # runner target = C1 body
         }
 
     # ----- Structure-based stop (ICT) -----

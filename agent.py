@@ -76,9 +76,8 @@ ENABLE_MSS = False              # standalone MSS off (backtest: ~break-even +0.0
 # NOTE: the trend-following "TrendMA" (dualcross 20/100 SMA) strategy was REMOVED
 # 2026-08-06 — the lab's risk-adjusted "edge" never showed up in live paper
 # trading (12 trades, one -32.9% blow-up on a too-wide stop); pulled entirely.
-UNIVERSE_SIZE = 40              # top N by mcap. Widened 20->40: with Variant C exits + VP,
-                                # the wide universe backtests POSITIVE (+1.28/trade) — the old
-                                # "alts crush the edge" was a pre-VariantC/pre-VP artifact.
+UNIVERSE_SIZE = 50              # top N by mcap (widened 40->50 per user) — applies to
+                                # ALL strategies (ICT + CRT) via get_universe_ranked.
 
 # Money-flow gate: only take a signal when the coin is in a real volume surge
 # (latest volume >= FLOW_MULT x its 20-bar average) — "trade where money is
@@ -631,8 +630,8 @@ Price: {best['price']}
                        "12h": "12-hour", "30m": "30-min"}
                 htf = TFN.get(s.get("htf", ""), s.get("htf", ""))
                 ltf = TFN.get(s.get("ltf", ""), TFN.get(s["timeframe"], s["timeframe"]))
-                tp, sl = tr["tp1"], tr["stop"]
-                rwd, rsk = abs(pct(tp)), abs(pct(sl))
+                tp1, tp2, sl = tr["tp1"], tr["tp2"], tr["stop"]
+                r1, r2, rsk = abs(pct(tp1)), abs(pct(tp2)), abs(pct(sl))
                 side = "🟢 BUY (long)" if s["direction"] == "LONG" else "🔴 SELL (short)"
                 dir_word = "uptrend" if s["direction"] == "LONG" else "downtrend"
                 trap = ("swept an old low then reversed up" if s["direction"] == "LONG"
@@ -642,19 +641,18 @@ Price: {best['price']}
                     f"{htf} setup · entry timed on the {ltf} chart",
                     "",
                     f"{side}",
-                    f"💵 Entry price   {fmt_price(entry)}",
-                    f"🎯 Take profit   {fmt_price(tp)}   (+{rwd:.1f}%)",
-                    f"🛑 Stop loss     {fmt_price(sl)}   (-{rsk:.1f}%)",
-                    f"⚖️ Potential gain +{rwd:.1f}%  vs  risk -{rsk:.1f}%",
+                    f"💵 Entry (limit)  {fmt_price(entry)}   ← wait for the pullback (retest)",
+                    f"🛑 Stop loss      {fmt_price(sl)}   (-{rsk:.1f}%)",
+                    f"🎯 Target 1       {fmt_price(tp1)}   (+{r1:.1f}%)   ← bank 50%, move stop to break-even",
+                    f"🏁 Target 2       {fmt_price(tp2)}   (+{r2:.1f}%)   ← runner to the C1 body",
                     "",
                     "📋 The logic (why it qualified):",
                     f"   • With the {htf} {dir_word} — only trading with the trend",
                     f"   • At a key level: {s.get('key_level', 'key levels')}",
                     f"   • Price {trap} — a liquidity grab (the trap)",
-                    f"   • Entry confirmed on the {ltf}: sweep + reversal (CISD)",
-                    "   • Target = the start of the range (C1 body)",
+                    f"   • Entry on the {ltf} retest into the discount zone (OTE)",
                     "",
-                    "📝 Best-setup scanner (paper) — your call; check the chart first.",
+                    "📝 Best-setup scanner (paper) — your call; risk ~1%, check the chart first.",
                 ]
                 blocks.append("\n".join(b))
                 continue
