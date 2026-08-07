@@ -634,12 +634,12 @@ Price: {best['price']}
                 tp, sl = tr["tp1"], tr["stop"]
                 rwd, rsk = abs(pct(tp)), abs(pct(sl))
                 side = "🟢 BUY (long)" if s["direction"] == "LONG" else "🔴 SELL (short)"
+                dir_word = "uptrend" if s["direction"] == "LONG" else "downtrend"
                 trap = ("swept an old low then reversed up" if s["direction"] == "LONG"
                         else "swept an old high then reversed down")
                 b = [
                     f"⭐ A+ CRT SETUP — {s['coin']}",
                     f"{htf} setup · entry timed on the {ltf} chart",
-                    f"Confluence: {s.get('key_level', 'key levels')}",
                     "",
                     f"{side}",
                     f"💵 Entry price   {fmt_price(entry)}",
@@ -647,9 +647,14 @@ Price: {best['price']}
                     f"🛑 Stop loss     {fmt_price(sl)}   (-{rsk:.1f}%)",
                     f"⚖️ Potential gain +{rwd:.1f}%  vs  risk -{rsk:.1f}%",
                     "",
-                    f"Why: price {trap} (a liquidity grab), with {s.get('key_level','key levels')}",
-                    "lining up — now expected to run to the take-profit.",
-                    "📝 Best-setup scanner (paper) — your call; check the chart before taking.",
+                    "📋 The logic (why it qualified):",
+                    f"   • With the {htf} {dir_word} — only trading with the trend",
+                    f"   • At a key level: {s.get('key_level', 'key levels')}",
+                    f"   • Price {trap} — a liquidity grab (the trap)",
+                    f"   • Entry confirmed on the {ltf}: sweep + reversal (CISD)",
+                    "   • Target = the start of the range (C1 body)",
+                    "",
+                    "📝 Best-setup scanner (paper) — your call; check the chart first.",
                 ]
                 blocks.append("\n".join(b))
                 continue
