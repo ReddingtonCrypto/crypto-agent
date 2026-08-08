@@ -172,36 +172,55 @@ def detect_crt_aligned(htf_df, ltf_df, kl_lookback=KL_LOOKBACK,
 
     import bisect
     j = max(bisect.bisect_left(lts.tolist(), c2_close), ltf_sweep_lb)
-    while j < m - 1 and lts[j] < end_ms:
+    # Walk the LTF: find a sweep + single-candle CISD that FORMS the OTE entry
+    # (the setup), then fire ONLY when price actually RETRACES into that limit on
+    # the LAST closed bar (a real fill) — not the instant the CISD prints at a
+    # level price hasn't reached. Mirrors OTE's detect_ote_live: kills the phantom
+    # instant-win + the re-open/re-alert churn (one real fill = one trade).
+    while j < last and lts[j] < end_ms:
         if direction == "SHORT" and lh[j] > protect:
             return None                                   # CRT invalidated
         if direction == "LONG" and ll[j] < protect:
             return None
-        if direction == "SHORT":
-            if lh[j] > lh[j - ltf_sweep_lb:j].max():        # swept a recent high
-                body_lo = min(lo_[j], lc[j])
-                for k in range(j + 1, min(j + 1 + cisd_window, m)):
-                    if lc[k] < body_lo:                     # single-candle CISD down
-                        if k != last:
-                            return None                     # triggered earlier, not now
-                        imp_lo = float(ll[j:k + 1].min())   # OTE: enter on the retest
-                        entry = imp_lo + (float(lh[j]) - imp_lo) * OTE_FIB
-                        if target >= entry:
-                            return None
+
+        entry = stop = cisd = None
+        if direction == "SHORT" and lh[j] > lh[j - ltf_sweep_lb:j].max():
+            body_lo = min(lo_[j], lc[j])
+            for k in range(j + 1, min(j + 1 + cisd_window, m)):
+                if lc[k] < body_lo:                         # single-candle CISD down
+                    imp_lo = float(ll[j:k + 1].min())       # OTE: enter on the retest
+                    entry = imp_lo + (float(lh[j]) - imp_lo) * OTE_FIB
+                    stop = float(lh[j]); cisd = k
+                    break
+        elif direction == "LONG" and ll[j] < ll[j - ltf_sweep_lb:j].min():
+            body_hi = max(lo_[j], lc[j])
+            for k in range(j + 1, min(j + 1 + cisd_window, m)):
+                if lc[k] > body_hi:
+                    imp_hi = float(lh[j:k + 1].max())
+                    entry = imp_hi - (imp_hi - float(ll[j])) * OTE_FIB
+                    stop = float(ll[j]); cisd = k
+                    break
+
+        if entry is not None and cisd < last:
+            room = (target < entry) if direction == "SHORT" else (target > entry)
+            if room:
+                # From the CISD bar to the last bar, the limit must NOT have filled
+                # yet and the setup must NOT be invalidated (stop) or completed
+                # (target). The last closed bar must be the FIRST fill.
+                spent = False
+                for f in range(cisd + 1, last):
+                    if direction == "SHORT":
+                        if lh[f] >= stop or ll[f] <= target or lh[f] >= entry:
+                            spent = True; break
+                    else:
+                        if ll[f] <= stop or lh[f] >= target or ll[f] <= entry:
+                            spent = True; break
+                if not spent:
+                    if direction == "SHORT" and lh[last] >= entry and lh[last] < stop and ll[last] > target:
                         return {"direction": direction, "entry": entry,
-                                "stop": float(lh[j]), "target": target, "key_level": key}
-        else:
-            if ll[j] < ll[j - ltf_sweep_lb:j].min():
-                body_hi = max(lo_[j], lc[j])
-                for k in range(j + 1, min(j + 1 + cisd_window, m)):
-                    if lc[k] > body_hi:
-                        if k != last:
-                            return None
-                        imp_hi = float(lh[j:k + 1].max())   # OTE: enter on the retest
-                        entry = imp_hi - (imp_hi - float(ll[j])) * OTE_FIB
-                        if target <= entry:
-                            return None
+                                "stop": stop, "target": target, "key_level": key}
+                    if direction == "LONG" and ll[last] <= entry and ll[last] > stop and lh[last] < target:
                         return {"direction": direction, "entry": entry,
-                                "stop": float(ll[j]), "target": target, "key_level": key}
+                                "stop": stop, "target": target, "key_level": key}
         j += 1
     return None

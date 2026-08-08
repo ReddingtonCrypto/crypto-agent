@@ -44,6 +44,24 @@ def _expired(opened_at, timeframe):
     return age_min >= minutes
 
 
+_SCHEMA_READY = False
+
+
+def _ensure_schema(conn):
+    """Add the signal_ts column once (backwards-compatible migration). signal_ts
+    identifies the CANDLE a setup triggered on, so the same setup can never open
+    twice — killing the re-open/re-alert loop where a limit-entry trade opens,
+    quick-closes, and the SAME bar re-triggers it on the next scan."""
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(paper_trades)").fetchall()]
+    if "signal_ts" not in cols:
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN signal_ts INTEGER")
+        conn.commit()
+    _SCHEMA_READY = True
+
+
 def has_open_trade(coin, direction, timeframe, strategy):
     conn = _conn()
     row = conn.execute(
@@ -55,20 +73,48 @@ def has_open_trade(coin, direction, timeframe, strategy):
     return row is not None
 
 
-def open_trade(coin, direction, entry, stop, tp1, tp2, score, timeframe, strategy):
-    """Open a paper trade, unless one for this coin+direction+timeframe+strategy
-    is already open. Returns True if a new trade was opened."""
-    if has_open_trade(coin, direction, timeframe, strategy):
+def open_trade(coin, direction, entry, stop, tp1, tp2, score, timeframe, strategy,
+               signal_ts=None):
+    """Open a paper trade. Returns True if a new trade was opened.
+
+    Blocked if EITHER a trade for this coin+direction+timeframe+strategy is
+    already OPEN, OR (when signal_ts is given) a trade for this exact SIGNAL
+    CANDLE already exists — open or closed. The second guard stops the re-open
+    loop: a limit-entry setup that opens, quick-closes, then re-triggers on the
+    very same candle on the next 5-min scan would otherwise re-open and re-alert
+    over and over. One candle -> one trade -> one alert.
+    """
+    conn = _conn()
+    _ensure_schema(conn)
+
+    open_dupe = conn.execute(
+        "SELECT 1 FROM paper_trades WHERE coin=? AND direction=? AND timeframe=? "
+        "AND strategy=? AND status='OPEN' LIMIT 1",
+        (coin, direction, timeframe, strategy),
+    ).fetchone()
+    if open_dupe:
+        conn.close()
         return False
 
-    conn = _conn()
+    if signal_ts is not None:
+        same_bar = conn.execute(
+            "SELECT 1 FROM paper_trades WHERE coin=? AND direction=? AND timeframe=? "
+            "AND strategy=? AND signal_ts=? LIMIT 1",
+            (coin, direction, timeframe, strategy, int(signal_ts)),
+        ).fetchone()
+        if same_bar:
+            conn.close()
+            return False
+
     conn.execute(
         """
         INSERT INTO paper_trades
-        (coin, direction, entry, stop, tp1, tp2, score, timeframe, strategy, status, opened_at)
-        VALUES (?,?,?,?,?,?,?,?,?, 'OPEN', ?)
+        (coin, direction, entry, stop, tp1, tp2, score, timeframe, strategy, status,
+         opened_at, signal_ts)
+        VALUES (?,?,?,?,?,?,?,?,?, 'OPEN', ?, ?)
         """,
-        (coin, direction, entry, stop, tp1, tp2, score, timeframe, strategy, _now()),
+        (coin, direction, entry, stop, tp1, tp2, score, timeframe, strategy, _now(),
+         int(signal_ts) if signal_ts is not None else None),
     )
     conn.commit()
     conn.close()

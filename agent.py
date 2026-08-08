@@ -19,6 +19,7 @@ from strategies.smc.market_structure import detect_structure
 from strategies.smc.smc_features import analyze as smc_analyze
 from strategies.smc.ict_model import detect_ict, detect_mss
 from strategies.smc.crt import detect_crt_aligned
+from strategies.smc.ote import detect_ote_live, htf_bias as ote_htf_bias
 from strategies.smc.orderflow import cvd_proxy, cisd, volume_rising
 from strategies.smc.volume_profile import value_area
 
@@ -58,6 +59,20 @@ ENABLE_CRT = True
 CRT_MIN_CONFLUENCE = 2   # require >=2 key levels stacking (A+ only)
 CRT_PAIRS = [("1M", "1d"), ("1w", "4h"), ("1d", "1h"),
              ("4h", "15m"), ("1h", "5m")]  # every HTF -> its aligned entry TF
+
+# OTE / "Textbook Setup" (ICT-2022) — the SEPARATE 3rd strategy (distinct from
+# ICT and CRT). Sweep -> displacement+MSS -> retrace into the 0.705-0.786 OTE
+# band (limit) -> stop beyond the origin, target the next liquidity, with the
+# group's 2R-partial/BE risk management. UNLIKE CRT, OTE has a walk-forward-
+# robust edge in backtest — but ONLY with the risk overlay and ONLY on the
+# mid/high timeframes (a measured signal-vs-noise gradient: sub-hourly is noise,
+# 1h+ is clean; 12h strongest). Fires only when the limit actually fills on the
+# last closed bar (detect_ote_live), so paper P&L tracks the backtest. Each
+# config = (entry timeframe, HTF-bias filter or None): 1h and 12h run natively;
+# 4h is gated by 12h structure (alignment rescues 4h's weak half). Still PAPER —
+# an honest forward-test to see if the robust backtest edge holds live.
+ENABLE_OTE = True
+OTE_CONFIGS = [("1h", None), ("12h", None), ("4h", "12h")]
 
 # Which timeframe must AGREE on direction before a Trend signal is allowed.
 # 1h confirms UP the ladder (don't fight the bigger trend);
@@ -325,9 +340,9 @@ def evaluate(closed, coin, timeframe, horizon):
 
 def passes_filters(s):
     """The rules that decide whether a coin is a tradeable signal."""
-    # CRT is gated inside its own detector (trend + key level + valid CRT), and
-    # it's a Daily/Weekly setup-marker — skip the ICT-oriented vol/VP/flow filters.
-    if s["strategy"] == "CRT":
+    # CRT and OTE are gated inside their own detectors (structure + key level +
+    # valid setup / limit fill) — skip the ICT-oriented vol/VP/flow filters.
+    if s["strategy"] in ("CRT", "OTE"):
         return True
 
     # Common requirements for both strategies.
@@ -485,12 +500,50 @@ def run_agent():
                         "confidence": 80, "price": crt["entry"], "atr": 0.0,
                         "stop_level": crt["stop"], "target_level": crt["target"],
                         "key_level": crt["key_level"], "htf": htf, "ltf": ltf,
+                        # signal_ts = the LTF entry candle, so this setup opens
+                        # (and alerts) ONCE — not on every scan within the bar.
+                        "signal_ts": int(ltf_df["timestamp"].iloc[-1]),
                         # defaults so shared print/alert paths don't KeyError
                         "regime": "-", "quality": "STRONG", "rsi": 0.0,
                         "vol_confirm": True, "smc": "-", "smc_features": [],
                     })
                 except Exception as e:
                     print(f"Error CRT {coin} {htf}->{ltf}: {type(e).__name__}: {e}")
+
+        # ----- OTE (Textbook Setup) pass: fire on the last-closed-bar limit fill,
+        #  optionally gated by higher-timeframe structure (4h gated by 12h). -----
+        if ENABLE_OTE:
+            for etf, hbias_tf in OTE_CONFIGS:
+                try:
+                    edf = _closed_df(coin, etf, per_tf)
+                    if edf is None:
+                        continue
+                    osig = detect_ote_live(edf)
+                    if not osig:
+                        continue
+                    # Alignment filter: drop setups that fight the HTF draw.
+                    if hbias_tf:
+                        hdf = _closed_df(coin, hbias_tf, per_tf)
+                        if hdf is not None:
+                            bias = ote_htf_bias(hdf)
+                            opp = "DOWN" if osig["direction"] == "LONG" else "UP"
+                            if bias == opp:
+                                continue
+                    horizon = etf if not hbias_tf else f"{hbias_tf}-bias → {etf}"
+                    signals.append({
+                        "coin": coin, "timeframe": etf, "horizon": horizon,
+                        "strategy": "OTE", "direction": osig["direction"],
+                        "confidence": 80, "price": osig["entry"], "atr": 0.0,
+                        "stop_level": osig["stop"], "target_level": osig["target"],
+                        "key_level": "OTE 0.705-0.786 retrace", "htf": hbias_tf or "",
+                        "ltf": etf, "ote_extreme": osig.get("extreme"),
+                        "signal_ts": int(edf["timestamp"].iloc[-1]),  # fill candle
+                        # defaults so shared print/alert paths don't KeyError
+                        "regime": "-", "quality": "STRONG", "rsi": 0.0,
+                        "vol_confirm": True, "smc": "-", "smc_features": [],
+                    })
+                except Exception as e:
+                    print(f"Error OTE {coin} {etf}: {type(e).__name__}: {e}")
 
     if not bar_map:
         print("No data collected")
@@ -560,6 +613,7 @@ def run_agent():
             s["coin"], s["direction"],
             trade["entry"], trade["stop"], trade["tp1"], trade["tp2"],
             s["confidence"], s["timeframe"], s["strategy"],
+            signal_ts=s.get("signal_ts"),
         )
         if opened:
             save_signal(
@@ -653,6 +707,41 @@ Price: {best['price']}
                     f"   • Entry on the {ltf} retest into the discount zone (OTE)",
                     "",
                     "📝 Best-setup scanner (paper) — your call; risk ~1%, check the chart first.",
+                ]
+                blocks.append("\n".join(b))
+                continue
+
+            if s["strategy"] == "OTE":
+                # OTE / Textbook Setup card — plain English, percentages.
+                TFN = {"1M": "Monthly", "1w": "Weekly", "1d": "Daily", "4h": "4-hour",
+                       "1h": "1-hour", "15m": "15-min", "5m": "5-min",
+                       "12h": "12-hour", "30m": "30-min"}
+                etf = TFN.get(s["timeframe"], s["timeframe"])
+                hb = s.get("htf", "")
+                where = (f"{etf} chart" if not hb
+                         else f"{etf} chart · aligned with the {TFN.get(hb, hb)} trend")
+                tp1, tp2, sl = tr["tp1"], tr["tp2"], tr["stop"]
+                r1, r2, rsk = abs(pct(tp1)), abs(pct(tp2)), abs(pct(sl))
+                side = "🟢 BUY (long)" if s["direction"] == "LONG" else "🔴 SELL (short)"
+                trap = ("swept an old low then reversed up" if s["direction"] == "LONG"
+                        else "swept an old high then reversed down")
+                b = [
+                    f"🎯 OTE SETUP — {s['coin']}",
+                    where,
+                    "",
+                    f"{side}",
+                    f"💵 Entry (limit)  {fmt_price(entry)}   ← the 0.705–0.786 retrace (OTE zone)",
+                    f"🛑 Stop loss      {fmt_price(sl)}   (-{rsk:.1f}%)   ← beyond the origin low/high",
+                    f"🎯 Target 1       {fmt_price(tp1)}   (+{r1:.1f}%)   ← bank 50%, stop to break-even",
+                    f"🏁 Target 2       {fmt_price(tp2)}   (+{r2:.1f}%)   ← runner to the next liquidity",
+                    "",
+                    "📋 The logic (Textbook Setup):",
+                    f"   • Price {trap} — a liquidity grab",
+                    "   • Then a strong displacement + market-structure shift (MSS)",
+                    "   • Entry on the retrace into the 0.705–0.786 discount/premium zone",
+                    "   • Target = the next resting liquidity",
+                    "",
+                    "📝 Paper forward-test — your call; risk ~1%, wait for the pullback fill.",
                 ]
                 blocks.append("\n".join(b))
                 continue

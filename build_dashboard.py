@@ -361,6 +361,7 @@ def build():
             tp_cells = f"<td>{fmt_price(r['tp1'])}</td><td>{fmt_price(r['tp2'])}</td>"
             return (
                 f"<tr><td>{r['coin']}{' 🎯' if r['tp1_hit'] else ''}</td>{dircell}"
+                f"<td>{r['strategy'] or '-'}</td>"
                 f"<td>{_type_of(r['timeframe'])}</td><td>{r['timeframe'] or '-'}</td>"
                 f"<td>{r['score']}%</td><td>{fmt_price(r['entry'])}</td>"
                 f"<td>{fmt_price(r['stop'])}</td>{tp_cells}"
@@ -368,7 +369,7 @@ def build():
             )
         dirhead = "<th>Dir</th>" if with_dir else ""
         return (
-            f"<table><tr><th>Coin</th>{dirhead}<th>Type</th><th>TF</th><th>Conf</th><th>Entry</th>"
+            f"<table><tr><th>Coin</th>{dirhead}<th>Strategy</th><th>Type</th><th>TF</th><th>Conf</th><th>Entry</th>"
             "<th>Stop</th><th>TP1</th><th>TP2</th><th>Opened (UTC)</th></tr>"
             f"{''.join(row(r) for r in rows)}</table>"
         )
@@ -385,14 +386,15 @@ def build():
         for r in closed_t:
             cls = "win" if r["status"] == "WIN" else "loss" if r["status"] == "LOSS" else "empty"
             closed_rows += (
-                f"<tr><td>{r['coin']}</td><td>{_type_of(r['timeframe'])}</td><td>{r['timeframe'] or '-'}</td>"
+                f"<tr><td>{r['coin']}</td><td>{r['strategy'] or '-'}</td>"
+                f"<td>{_type_of(r['timeframe'])}</td><td>{r['timeframe'] or '-'}</td>"
                 f"<td>{_dir_span(r['direction'])}</td>"
                 f'<td class="{cls}">{r["status"]}</td>'
                 f'<td class="{cls}">{r["pnl_pct"]}%</td>'
                 f"<td>{r['closed_at']}</td></tr>"
             )
         closed_table = (
-            "<table><tr><th>Coin</th><th>Type</th><th>TF</th><th>Dir</th><th>Result</th>"
+            "<table><tr><th>Coin</th><th>Strategy</th><th>Type</th><th>TF</th><th>Dir</th><th>Result</th>"
             "<th>P&L</th><th>Closed (UTC)</th></tr>"
             f"{closed_rows}</table>"
         )

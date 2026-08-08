@@ -14,9 +14,10 @@ def calculate_trade(price, direction, atr, strategy="Trend", stop_level=None,
     """
     entry = price
 
-    # ----- CRT: OTE stop + the group's risk management (bank 50% at 2R, move
-    #  SL to break-even, let the runner go to the C1-body target). -----
-    if strategy == "CRT" and stop_level is not None and target_level is not None:
+    # ----- CRT and OTE: explicit stop + the group's risk management (bank 50%
+    #  at 2R, move SL to break-even, let the runner go to the target level —
+    #  CRT's C1 body / OTE's next-liquidity target). -----
+    if strategy in ("CRT", "OTE") and stop_level is not None and target_level is not None:
         stop = float(stop_level)
         tgt = float(target_level)
         risk = abs(entry - stop)
