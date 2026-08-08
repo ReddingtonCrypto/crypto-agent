@@ -78,6 +78,19 @@ USE_KEYLEVEL = "--keylevel" in sys.argv
 USE_CONFIRM = "--confirm" in sys.argv
 LONG_ONLY = "--long-only" in sys.argv
 SHORT_ONLY = "--short-only" in sys.argv
+# --- OTE-recipe levers (to test whether the recipe that rescued OTE also
+#  rescues CRT): --partial banks 50% at TP1_R and moves the runner to break-even
+#  (the group's risk mgmt); --target-r=N replaces the near C1-body target with a
+#  FAR N-risk target (the group's ride-to-liquidity, R:R 4-5). Default off = the
+#  faithful textbook CRT (single C1-body target, no partial).
+USE_PARTIAL = "--partial" in sys.argv
+TP1_R = 2.0
+TARGET_R = None
+for _a in sys.argv:
+    if _a.startswith("--tp1r="):
+        TP1_R = float(_a.split("=", 1)[1])
+    if _a.startswith("--target-r="):
+        TARGET_R = float(_a.split("=", 1)[1])
 # --align : the taught timeframe-alignment model. Form the CRT (+ trend +
 # key level) on the HIGHER timeframe, then drop to the aligned LOWER timeframe
 # for the entry (a liquidity sweep + single-candle CISD), with a TIGHT stop at
@@ -176,6 +189,53 @@ def _simulate(highs, lows, closes, i, direction, entry, stop, target):
     last = closes[end - 1]
     gross = ((last - entry) if direction == "LONG" else (entry - last)) / entry * 100.0
     return "EXPIRED", gross - FEE * 200, risk_pct
+
+
+def _simulate_partial(highs, lows, closes, i, direction, entry, stop, target):
+    """The group's risk management: bank 50% at TP1 = TP1_R risk multiples, move
+    the runner's stop to break-even, run the rest to `target`. Same fee model
+    and MAX_HOLD as _simulate. Returns (result, pnl_pct, risk_pct)."""
+    risk = abs(entry - stop)
+    risk_pct = risk / entry * 100.0
+    tp1 = entry + TP1_R * risk if direction == "LONG" else entry - TP1_R * risk
+    end = min(len(highs), i + 1 + MAX_HOLD)
+
+    def pct(px):
+        return ((px - entry) if direction == "LONG" else (entry - px)) / entry * 100.0
+
+    banked = None
+    for k in range(i + 1, end):
+        hi, lo = highs[k], lows[k]
+        if banked is None:
+            hit_stop = (lo <= stop) if direction == "LONG" else (hi >= stop)
+            hit_tp1 = (hi >= tp1) if direction == "LONG" else (lo <= tp1)
+            if hit_stop:                       # stopped before TP1 -> full -1R
+                return "LOSS", pct(stop) - FEE * 200, risk_pct
+            if hit_tp1:
+                banked = 0.5 * pct(tp1)        # 50% booked; runner stop -> BE
+        else:
+            hit_be = (lo <= entry) if direction == "LONG" else (hi >= entry)
+            hit_tgt = (hi >= target) if direction == "LONG" else (lo <= target)
+            if hit_be and not hit_tgt:
+                return "WIN", banked - FEE * 200, risk_pct   # runner scratched at BE
+            if hit_tgt:
+                return "WIN", banked + 0.5 * pct(target) - FEE * 200, risk_pct
+    if banked is None:
+        last = closes[end - 1]
+        return "EXPIRED", pct(last) - FEE * 200, risk_pct
+    return "WIN", banked + 0.5 * pct(closes[end - 1]) - FEE * 200, risk_pct
+
+
+def _run_sim(highs, lows, closes, i, direction, entry, stop, target):
+    """Route a trade through the chosen simulator, optionally overriding the
+    near C1-body target with a FAR N-risk target (--target-r) and/or using the
+    2R-partial+BE plan (--partial)."""
+    if TARGET_R is not None:
+        risk = abs(entry - stop)
+        target = entry + TARGET_R * risk if direction == "LONG" else entry - TARGET_R * risk
+    if USE_PARTIAL:
+        return _simulate_partial(highs, lows, closes, i, direction, entry, stop, target)
+    return _simulate(highs, lows, closes, i, direction, entry, stop, target)
 
 
 def _has_fvg(o, h, l, c, i, direction):
@@ -317,7 +377,7 @@ def backtest_coin(coin):
                     continue
                 enter_i = j
 
-            result, pnl, risk = _simulate(h, lo, c, enter_i, direction, entry, stop, target)
+            result, pnl, risk = _run_sim(h, lo, c, enter_i, direction, entry, stop, target)
             st["n"] += 1
             st["pnl"] += pnl
             st["r_sum"] += pnl / risk if risk else 0.0
@@ -424,7 +484,7 @@ def backtest_coin_aligned(coin):
             if direction == "SHORT" and target >= entry:
                 continue
 
-            result, pnl, risk = _simulate(lh, ll, lc, enter_idx, direction, entry, stop, target)
+            result, pnl, risk = _run_sim(lh, ll, lc, enter_idx, direction, entry, stop, target)
             st["n"] += 1
             st["pnl"] += pnl
             st["r_sum"] += pnl / risk if risk else 0.0
