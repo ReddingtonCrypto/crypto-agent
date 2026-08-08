@@ -59,6 +59,18 @@ REFRESH = "--refresh" in sys.argv
 FEE = 0.001          # 0.1% per side -> 0.2% round-trip, same as backtest.py
 MAX_HOLD = 200       # bars to give a trade before the time-stop closes it
 KL_LOOKBACK = 20     # bars back a sweep must exceed to count as an "old high/low"
+FVG_LOOKBACK = 15    # bars back to search for a Fair Value Gap key level
+REJ_LOOKBACK = 20    # bars back to search for a Rejection Block (failed CISD)
+REJ_TOL = 0.01       # how close the CRT must form to the rejection level (frac)
+
+# --kl=oldhl,fvg,rejblock : which key-level TYPES count when --keylevel is on.
+# The taught key levels are all three (FVG, Old High/Low, Rejection Block); a
+# setup qualifies if it sits at ANY enabled one. Default = all three. Restrict
+# to a single type to A/B which key level actually helps (esp. for shorts).
+KL_TYPES = {"oldhl", "fvg", "rejblock"}
+for _a in sys.argv:
+    if _a.startswith("--kl="):
+        KL_TYPES = set(_a.split("=", 1)[1].split(","))
 
 # ---- flags ----
 USE_TREND = "--trend" in sys.argv
@@ -166,6 +178,59 @@ def _simulate(highs, lows, closes, i, direction, entry, stop, target):
     return "EXPIRED", gross - FEE * 200, risk_pct
 
 
+def _has_fvg(o, h, l, c, i, direction):
+    """True if the CRT's swept extreme taps a matching-direction 3-candle FVG
+    (imbalance) in the recent lookback — bullish gap high[a]<low[k] (demand)
+    for longs, bearish gap low[a]>high[k] (supply) for shorts."""
+    swept = l[i] if direction == "LONG" else h[i]
+    start = max(2, i - FVG_LOOKBACK)
+    for k in range(i, start - 1, -1):
+        a = k - 2
+        if a < 0:
+            break
+        if direction == "LONG" and h[a] < l[k]:      # bullish FVG zone [h[a], l[k]]
+            if h[a] <= swept <= l[k]:
+                return True
+        if direction == "SHORT" and l[a] > h[k]:     # bearish FVG zone [h[k], l[a]]
+            if h[k] <= swept <= l[a]:
+                return True
+    return False
+
+
+def _has_rejblock(o, h, l, c, i, direction):
+    """Rejection Block = a failed CISD (approximation): a recent candle swept a
+    prior KL_LOOKBACK extreme with its WICK but CLOSED back inside (the breakout
+    failed and held), and the current CRT is forming at that same level. A held
+    failed-breakdown = bullish rejection block (support); failed-breakout =
+    bearish rejection block (resistance)."""
+    swept = l[i] if direction == "LONG" else h[i]
+    start = max(KL_LOOKBACK + 1, i - REJ_LOOKBACK)
+    for j in range(i - 1, start - 1, -1):
+        if direction == "LONG":
+            prior_lo = l[j - KL_LOOKBACK:j].min()
+            if l[j] < prior_lo <= c[j] and abs(swept - l[j]) / l[j] <= REJ_TOL:
+                return True
+        else:
+            prior_hi = h[j - KL_LOOKBACK:j].max()
+            if h[j] > prior_hi >= c[j] and abs(swept - h[j]) / h[j] <= REJ_TOL:
+                return True
+    return False
+
+
+def _at_keylevel(o, h, l, c, i, direction):
+    """Setup qualifies if it sits at ANY enabled key-level type."""
+    if "oldhl" in KL_TYPES:
+        if direction == "SHORT" and h[i] >= h[i - KL_LOOKBACK:i].max():
+            return True
+        if direction == "LONG" and l[i] <= l[i - KL_LOOKBACK:i].min():
+            return True
+    if "fvg" in KL_TYPES and _has_fvg(o, h, l, c, i, direction):
+        return True
+    if "rejblock" in KL_TYPES and _has_rejblock(o, h, l, c, i, direction):
+        return True
+    return False
+
+
 def backtest_coin(coin):
     """Return a stats dict for one coin across all timeframes."""
     st = {"wins": 0, "losses": 0, "expired": 0, "pnl": 0.0,
@@ -229,14 +294,9 @@ def backtest_coin(coin):
                 if td is None or td != direction:
                     continue
 
-            # --- Layer: key level (swept a recent KL_LOOKBACK-bar extreme) ---
-            if USE_KEYLEVEL:
-                if direction == "SHORT":
-                    if c2_hi < h[i - KL_LOOKBACK:i].max():
-                        continue
-                else:
-                    if c2_lo > lo[i - KL_LOOKBACK:i].min():
-                        continue
+            # --- Layer: key level (FVG / old high-low / rejection block) ---
+            if USE_KEYLEVEL and not _at_keylevel(o, h, lo, c, i, direction):
+                continue
 
             enter_i = i
             # --- Layer: C3 confirmation (single-candle distribution close) ---
@@ -347,11 +407,8 @@ def backtest_coin_aligned(coin):
                 td = _trend_dir(hdf, i)
                 if td is None or td != direction:
                     continue
-            if USE_KEYLEVEL:
-                if direction == "SHORT" and hh[i] < hh[i - KL_LOOKBACK:i].max():
-                    continue
-                if direction == "LONG" and hl[i] > hl[i - KL_LOOKBACK:i].min():
-                    continue
+            if USE_KEYLEVEL and not _at_keylevel(ho, hh, hl, hc, i, direction):
+                continue
 
             t2 = int(hts[i]) + htf_ms                 # C2 close time
             if not lts or t2 < lts[0] or t2 > lts[-1]:
@@ -394,7 +451,7 @@ def main():
 
     layers = []
     if USE_TREND: layers.append("trend")
-    if USE_KEYLEVEL: layers.append("keylevel")
+    if USE_KEYLEVEL: layers.append(f"keylevel[{'+'.join(sorted(KL_TYPES))}]")
     if USE_CONFIRM: layers.append("C3-confirm")
     if LONG_ONLY: layers.append("long-only")
     if SHORT_ONLY: layers.append("short-only")
