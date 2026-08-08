@@ -41,6 +41,11 @@ OTE_FIB = 0.75      # the limit level inside the band we actually rest the order
 STOP_BUF = 0.001    # push the stop this fraction beyond the origin (breathing room)
 MIN_RR = 1.5        # discard setups whose target/stop reward:risk is below this
 ENTRY_WINDOW = 20   # bars after the MSS the OTE limit may still fill (live + backtest)
+INSTANT_CISD = 0    # 0 = off. N>0 = the "instant CISD" quality filter (from the
+                    # group): the displacement/MSS must complete within N bars of
+                    # the sweep origin — a sharp reversal, not a slow grind. The
+                    # group's rule: an INSTANT change-in-state = high probability;
+                    # a slow one = low probability and usually fails.
 
 
 def _confirmed_swings(h, l, lb=SWING_LB):
@@ -118,7 +123,8 @@ def detect_ote_at(o, h, l, c, i, swings, require_fvg=True):
         swept = pb > pa and L < min(lo_px[pa:pb])
         H = float(h[L_idx:i + 1].max())
         disp = (not require_fvg) or _has_bull_fvg(h, l, L_idx, i)
-        if swept and disp and H > L:
+        instant = (not INSTANT_CISD) or (i - L_idx <= INSTANT_CISD)  # sharp reversal
+        if swept and disp and instant and H > L:
             leg = H - L
             entry = H - OTE_FIB * leg
             stop = L * (1 - STOP_BUF)
@@ -146,7 +152,8 @@ def detect_ote_at(o, h, l, c, i, swings, require_fvg=True):
         swept = pb > pa and H > max(hi_px[pa:pb])
         L = float(l[H_idx:i + 1].min())
         disp = (not require_fvg) or _has_bear_fvg(h, l, H_idx, i)
-        if swept and disp and H > L:
+        instant = (not INSTANT_CISD) or (i - H_idx <= INSTANT_CISD)  # sharp reversal
+        if swept and disp and instant and H > L:
             leg = H - L
             entry = L + OTE_FIB * leg
             stop = H * (1 + STOP_BUF)

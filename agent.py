@@ -19,7 +19,14 @@ from strategies.smc.market_structure import detect_structure
 from strategies.smc.smc_features import analyze as smc_analyze
 from strategies.smc.ict_model import detect_ict, detect_mss
 from strategies.smc.crt import detect_crt_aligned
+from strategies.smc import ote as ote_lib
 from strategies.smc.ote import detect_ote_live, htf_bias as ote_htf_bias
+
+# Apply the group's "instant CISD" quality filter to the LIVE detector: the
+# displacement/MSS must fire within 5 bars of the sweep origin (a sharp reversal,
+# not a slow grind). Walk-forward-validated improvement on 1h (+0.09->+0.24%/tr)
+# and 12h (+2.21->+3.02%/tr). Applies to both the strict track and the scanner.
+ote_lib.INSTANT_CISD = 5
 from strategies.smc.orderflow import cvd_proxy, cisd, volume_rising
 from strategies.smc.volume_profile import value_area
 
@@ -73,6 +80,16 @@ CRT_PAIRS = [("1M", "1d"), ("1w", "4h"), ("1d", "1h"),
 # an honest forward-test to see if the robust backtest edge holds live.
 ENABLE_OTE = True
 OTE_CONFIGS = [("1h", None), ("12h", None), ("4h", "12h")]
+
+# OTE SETUP-SCANNER (strategy="OTE-Scan") — the WIDE discretionary feed. OTE's
+# mechanical edge is only on 1h/12h (above), but the group trades the same
+# textbook setup down on the lower timeframes across all coins, by hand. So on
+# these TFs we ALERT the setups as MARKERS for the user's own judgement (the
+# edge is the selection, not the raw signal) and track them under a SEPARATE
+# label so the strict OTE scoreboard stays clean. Honest: these low-TF setups
+# are NOT proven profitable on their own — they are a feed to apply discretion.
+ENABLE_OTE_SCAN = True
+OTE_SCAN_TFS = ["15m", "30m"]
 
 # Which timeframe must AGREE on direction before a Trend signal is allowed.
 # 1h confirms UP the ladder (don't fight the bigger trend);
@@ -342,7 +359,7 @@ def passes_filters(s):
     """The rules that decide whether a coin is a tradeable signal."""
     # CRT and OTE are gated inside their own detectors (structure + key level +
     # valid setup / limit fill) — skip the ICT-oriented vol/VP/flow filters.
-    if s["strategy"] in ("CRT", "OTE"):
+    if s["strategy"] in ("CRT", "OTE", "OTE-Scan"):
         return True
 
     # Common requirements for both strategies.
@@ -545,6 +562,31 @@ def run_agent():
                 except Exception as e:
                     print(f"Error OTE {coin} {etf}: {type(e).__name__}: {e}")
 
+        # ----- OTE-Scan pass: the wide, lower-timeframe discretionary feed
+        #  (markers for the user's judgement; tracked under its own label). -----
+        if ENABLE_OTE_SCAN:
+            for etf in OTE_SCAN_TFS:
+                try:
+                    edf = _closed_df(coin, etf, per_tf)
+                    if edf is None:
+                        continue
+                    osig = detect_ote_live(edf)
+                    if not osig:
+                        continue
+                    signals.append({
+                        "coin": coin, "timeframe": etf, "horizon": f"{etf} scan",
+                        "strategy": "OTE-Scan", "direction": osig["direction"],
+                        "confidence": 75, "price": osig["entry"], "atr": 0.0,
+                        "stop_level": osig["stop"], "target_level": osig["target"],
+                        "key_level": "OTE 0.705-0.786 retrace", "htf": "",
+                        "ltf": etf, "ote_extreme": osig.get("extreme"),
+                        "signal_ts": int(edf["timestamp"].iloc[-1]),
+                        "regime": "-", "quality": "STRONG", "rsi": 0.0,
+                        "vol_confirm": True, "smc": "-", "smc_features": [],
+                    })
+                except Exception as e:
+                    print(f"Error OTE-Scan {coin} {etf}: {type(e).__name__}: {e}")
+
     if not bar_map:
         print("No data collected")
         return
@@ -711,8 +753,9 @@ Price: {best['price']}
                 blocks.append("\n".join(b))
                 continue
 
-            if s["strategy"] == "OTE":
+            if s["strategy"] in ("OTE", "OTE-Scan"):
                 # OTE / Textbook Setup card — plain English, percentages.
+                scan = s["strategy"] == "OTE-Scan"
                 TFN = {"1M": "Monthly", "1w": "Weekly", "1d": "Daily", "4h": "4-hour",
                        "1h": "1-hour", "15m": "15-min", "5m": "5-min",
                        "12h": "12-hour", "30m": "30-min"}
@@ -726,8 +769,8 @@ Price: {best['price']}
                 trap = ("swept an old low then reversed up" if s["direction"] == "LONG"
                         else "swept an old high then reversed down")
                 b = [
-                    f"🎯 OTE SETUP — {s['coin']}",
-                    where,
+                    (f"🔎 OTE SCAN — {s['coin']}" if scan else f"🎯 OTE SETUP — {s['coin']}"),
+                    (where + "  ·  lower-TF feed — your discretion" if scan else where),
                     "",
                     f"{side}",
                     f"💵 Entry (limit)  {fmt_price(entry)}   ← the 0.705–0.786 retrace (OTE zone)",
@@ -741,7 +784,9 @@ Price: {best['price']}
                     "   • Entry on the retrace into the 0.705–0.786 discount/premium zone",
                     "   • Target = the next resting liquidity",
                     "",
-                    "📝 Paper forward-test — your call; risk ~1%, wait for the pullback fill.",
+                    ("📝 Scanner marker — NOT auto-traded on edge; apply your own judgement."
+                     if scan else
+                     "📝 Paper forward-test — your call; risk ~1%, wait for the pullback fill."),
                 ]
                 blocks.append("\n".join(b))
                 continue

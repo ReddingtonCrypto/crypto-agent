@@ -87,6 +87,8 @@ for _a in sys.argv:
         FIXED_R = float(_a.split("=", 1)[1].rstrip("rR"))
     if _a.startswith("--htf="):
         HTF = _a.split("=", 1)[1]
+    if _a.startswith("--instant-cisd="):
+        ote.INSTANT_CISD = int(_a.split("=", 1)[1])
     if _a.startswith("--min-rr="):
         ote.MIN_RR = float(_a.split("=", 1)[1])
     if _a.startswith("--entry-window="):
