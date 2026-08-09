@@ -146,6 +146,54 @@ def detect_crt_setup(df, kl_lookback=KL_LOOKBACK, min_confluence=1, min_rr=1.0):
             "regime": "range" if trend is None else "with-trend"}
 
 
+def detect_crt_scout(df, min_confluence=1, kl_lookback=KL_LOOKBACK):
+    """SCOUT detector for the human-approval flow — the user's own method:
+    a CRT on the last CLOSED candle (C2 sweeps C1's high/low AND closes back
+    inside), sitting at key-level confluence (FVG / old high-low / rejection
+    block), direction = the REVERSAL itself (NO trend filter — swept a low +
+    closed back in = LONG; swept a high = SHORT). Marks the setup for the human
+    to approve; it does NOT auto-open.
+
+    Entry = C2 close. Stop = C2's swept extreme. TP1 = 50% of the C1 range,
+    TP2 = the opposite C1 extreme (the draw-on-liquidity). Returns
+    {direction, entry, stop, tp1, tp2, key_level, confluence, signal_ts} or None.
+    """
+    if len(df) < max(kl_lookback + 3, 45):
+        return None
+    c1 = df.iloc[-2]
+    c2 = df.iloc[-1]
+    c1_hi, c1_lo = float(c1.high), float(c1.low)
+    entry = float(c2.close)
+    if c2.high > c1_hi and c1_lo <= entry <= c1_hi:
+        direction, stop = "SHORT", float(c2.high)
+    elif c2.low < c1_lo and c1_lo <= entry <= c1_hi:
+        direction, stop = "LONG", float(c2.low)
+    else:
+        return None
+
+    i = len(df) - 1
+    highs, lows = find_swings(df, lookback=2)
+    cnt, labels = key_levels.count_key_levels(df, i, direction, swings=(highs, lows))
+    if cnt < min_confluence:
+        return None
+
+    mid = (c1_hi + c1_lo) / 2.0
+    opp = c1_hi if direction == "LONG" else c1_lo
+    if direction == "LONG":
+        if not (stop < entry < opp):
+            return None
+        tp1 = mid if mid > entry else (entry + opp) / 2.0
+    else:
+        if not (opp < entry < stop):
+            return None
+        tp1 = mid if mid < entry else (entry + opp) / 2.0
+
+    return {"direction": direction, "entry": entry, "stop": stop,
+            "tp1": float(tp1), "tp2": float(opp),
+            "key_level": " + ".join(labels) or "key level", "confluence": cnt,
+            "signal_ts": int(c2.timestamp)}
+
+
 def _smt_confirms(df, ref_df, i, direction):
     """SMT (cross-asset divergence): at the C2 bar, did the REFERENCE asset NOT
     sweep the same way? (divergence in the CRT's favour). Aligns by timestamp.

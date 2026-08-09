@@ -121,6 +121,102 @@ def open_trade(coin, direction, entry, stop, tp1, tp2, score, timeframe, strateg
     return True
 
 
+def create_pending(coin, direction, entry, stop, tp1, tp2, score, timeframe,
+                   strategy, signal_ts=None):
+    """Save a setup AWAITING human approval (status='PENDING'). It is NOT counted
+    on the scoreboard until approved. Deduped on the signal candle so the same
+    setup is only ever proposed once. Returns the new pending row id, or None if
+    it already exists (any status)."""
+    conn = _conn()
+    _ensure_schema(conn)
+    if signal_ts is not None:
+        dupe = conn.execute(
+            "SELECT id FROM paper_trades WHERE coin=? AND direction=? AND timeframe=? "
+            "AND strategy=? AND signal_ts=? LIMIT 1",
+            (coin, direction, timeframe, strategy, int(signal_ts)),
+        ).fetchone()
+        if dupe:
+            conn.close()
+            return None
+    cur = conn.execute(
+        """
+        INSERT INTO paper_trades
+        (coin, direction, entry, stop, tp1, tp2, score, timeframe, strategy, status,
+         signal_ts)
+        VALUES (?,?,?,?,?,?,?,?,?, 'PENDING', ?)
+        """,
+        (coin, direction, entry, stop, tp1, tp2, score, timeframe, strategy,
+         int(signal_ts) if signal_ts is not None else None),
+    )
+    pid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return pid
+
+
+def get_pending(pending_id):
+    """Return a PENDING trade as a dict, or None if not found / not pending."""
+    conn = _conn()
+    row = conn.execute(
+        "SELECT id, coin, direction, entry, stop, tp1, tp2, timeframe, strategy, "
+        "status FROM paper_trades WHERE id=?",
+        (pending_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    keys = ["id", "coin", "direction", "entry", "stop", "tp1", "tp2",
+            "timeframe", "strategy", "status"]
+    return dict(zip(keys, row))
+
+
+def approve_pending(pending_id):
+    """Human approved a PENDING setup -> promote it to OPEN and start tracking
+    (opened_at set now). Returns the trade dict on success, or None if it wasn't
+    pending or a live OPEN duplicate already exists. Idempotent: a second approve
+    press does nothing."""
+    conn = _conn()
+    row = conn.execute(
+        "SELECT coin, direction, timeframe, strategy, status FROM paper_trades WHERE id=?",
+        (pending_id,),
+    ).fetchone()
+    if not row or row[4] != "PENDING":
+        conn.close()
+        return None
+    coin, direction, timeframe, strategy, _ = row
+    open_dupe = conn.execute(
+        "SELECT 1 FROM paper_trades WHERE coin=? AND direction=? AND timeframe=? "
+        "AND strategy=? AND status='OPEN' LIMIT 1",
+        (coin, direction, timeframe, strategy),
+    ).fetchone()
+    if open_dupe:
+        conn.execute("UPDATE paper_trades SET status='SKIPPED' WHERE id=?", (pending_id,))
+        conn.commit()
+        conn.close()
+        return None
+    conn.execute(
+        "UPDATE paper_trades SET status='OPEN', opened_at=? WHERE id=?",
+        (_now(), pending_id),
+    )
+    conn.commit()
+    conn.close()
+    return get_pending(pending_id)
+
+
+def reject_pending(pending_id):
+    """Human skipped a PENDING setup -> mark SKIPPED (never tracked). Returns True
+    if a pending row was updated."""
+    conn = _conn()
+    cur = conn.execute(
+        "UPDATE paper_trades SET status='SKIPPED' WHERE id=? AND status='PENDING'",
+        (pending_id,),
+    )
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return n > 0
+
+
 PARTIAL_FRAC = 0.5   # fraction of the position banked at TP1 (rest runs to TP2)
 
 

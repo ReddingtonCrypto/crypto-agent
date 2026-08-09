@@ -18,7 +18,9 @@ from market_filter import market_quality
 from strategies.smc.market_structure import detect_structure
 from strategies.smc.smc_features import analyze as smc_analyze
 from strategies.smc.ict_model import detect_ict, detect_mss
-from strategies.smc.crt import detect_crt_aligned, detect_crt_setup, detect_crt_enhanced
+from strategies.smc.crt import (
+    detect_crt_aligned, detect_crt_setup, detect_crt_enhanced, detect_crt_scout)
+import telegram_approve
 from strategies.smc import ote as ote_lib
 from strategies.smc.ote import detect_ote_live, htf_bias as ote_htf_bias
 
@@ -77,6 +79,21 @@ TIMEFRAMES = [
 # positive, broad across the universe. DAILY ONLY (4h/12h tested negative, no TF
 # alignment). Paper forward-test. See memory/crt-enhancement-research.md.
 ENABLE_CRT = True
+
+# CRT-Scout: the human-approval scanner. Each scan, across SCOUT_TFS, it finds a
+# CRT on the last closed candle at key-level confluence (the user's own method,
+# reversal direction, NO trend filter), saves it as a PENDING paper trade, and
+# sends it to Telegram with Approve/Skip buttons. Approving flips it to a tracked
+# OPEN trade under the "CRT-Scout" strategy; skipping drops it. The auto CRT model
+# above keeps running independently. All paper.
+ENABLE_CRT_SCOUT = True
+SCOUT_TFS = ["1w", "1d", "4h"]
+# Confluence gate for an alert: how many key levels (FVG / old high-low /
+# rejection block) must STACK. 2 = A+ only (~6% of candles, ~20 alerts/day — a
+# reviewable feed). Set to 1 for every single-key-level CRT (~30% of candles,
+# ~100/day — a flood). Tune here without touching anything else.
+SCOUT_MIN_CONFLUENCE = 2
+SCOUT_STRATEGY = "CRT-Scout"
 
 # OTE / "Textbook Setup" (ICT-2022) — the SEPARATE 3rd strategy (distinct from
 # ICT and CRT). Sweep -> displacement+MSS -> retrace into the 0.705-0.786 OTE
@@ -450,12 +467,62 @@ def _plain(tag):
     return PLAIN_TERMS.get(tag, tag)
 
 
+def _scout_alert_text(coin, tf, s):
+    """Telegram body for a CRT-Scout setup awaiting approval."""
+    d = s["direction"]
+    risk = abs(s["entry"] - s["stop"])
+    rr = abs(s["tp2"] - s["entry"]) / risk if risk else 0.0
+    arrow = "🟢 LONG" if d == "LONG" else "🔴 SHORT"
+    return (
+        f"🔎 <b>CRT-Scout</b> — approve to track\n\n"
+        f"<b>{coin}</b> · {tf} · {arrow}\n"
+        f"Key level: {s['key_level']} (confluence {s['confluence']})\n\n"
+        f"Entry: <code>{s['entry']:.6g}</code>\n"
+        f"Stop:  <code>{s['stop']:.6g}</code>\n"
+        f"TP1 (50%): <code>{s['tp1']:.6g}</code>\n"
+        f"TP2 (opp): <code>{s['tp2']:.6g}</code>\n"
+        f"R:R to TP2 ≈ {rr:.1f}\n\n"
+        f"✅ Approve = open a tracked paper trade · ❌ Skip = ignore"
+    )
+
+
+def process_approvals():
+    """Read Telegram button presses and act on them: Approve -> promote the
+    PENDING paper trade to a tracked OPEN one; Skip -> mark it SKIPPED. Sends a
+    short confirmation for each. Safe to call every scan."""
+    try:
+        decisions = telegram_approve.poll_decisions()
+    except Exception as e:
+        print(f"approval poll failed: {type(e).__name__}: {e}")
+        return
+    for action, pid in decisions:
+        try:
+            if action == "appr":
+                tr = paper_trading.approve_pending(pid)
+                if tr:
+                    asyncio.run(send_alert(
+                        f"✅ Tracking {tr['coin']} {tr['direction']} "
+                        f"({tr['timeframe']}, CRT-Scout) — now on the scoreboard."))
+                else:
+                    asyncio.run(send_alert(
+                        f"⚠️ Setup #{pid} could not be opened (already open or expired)."))
+            else:
+                if paper_trading.reject_pending(pid):
+                    asyncio.run(send_alert(f"❌ Skipped setup #{pid}."))
+        except Exception as e:
+            print(f"approval action failed for #{pid}: {type(e).__name__}: {e}")
+
+
 def run_agent():
 
     print("\n==============================")
     print("Scanning market...")
     print(datetime.now())
     print("==============================\n")
+
+    # First, action any Approve/Skip button presses since the last scan.
+    if ENABLE_CRT_SCOUT:
+        process_approvals()
 
     # Live universe: blend of market cap + Binance 24h volume + sector heat
     # (liquidity/narrative). Fails soft to plain market-cap order.
@@ -478,6 +545,7 @@ def run_agent():
 
     signals = []
     bar_map = {}
+    scout_count = 0        # CRT-Scout setups proposed for approval this scan
     # CRT SMT reference: BTC & ETH daily candles (fetched once per scan).
     crt_btc_1d = _closed_df("BTC/USDT", "1d", {}) if ENABLE_CRT else None
     crt_eth_1d = _closed_df("ETH/USDT", "1d", {}) if ENABLE_CRT else None
@@ -535,6 +603,29 @@ def run_agent():
                         })
             except Exception as e:
                 print(f"Error CRT {coin}: {type(e).__name__}: {e}")
+
+        # ----- CRT-Scout pass: propose a CRT-at-key-level setup for HUMAN approval
+        #  (the user's own method, reversal direction, no trend filter). Saves a
+        #  PENDING paper trade + sends Approve/Skip buttons; never auto-opens. -----
+        if ENABLE_CRT_SCOUT:
+            for stf in SCOUT_TFS:
+                try:
+                    sdf = _closed_df(coin, stf, per_tf)
+                    if sdf is None:
+                        continue
+                    setup = detect_crt_scout(sdf, min_confluence=SCOUT_MIN_CONFLUENCE)
+                    if not setup:
+                        continue
+                    pid = paper_trading.create_pending(
+                        coin, setup["direction"], setup["entry"], setup["stop"],
+                        setup["tp1"], setup["tp2"], setup["confluence"], stf,
+                        SCOUT_STRATEGY, signal_ts=setup["signal_ts"])
+                    if pid is None:
+                        continue                       # already proposed this candle
+                    if telegram_approve.send_approval(pid, _scout_alert_text(coin, stf, setup)):
+                        scout_count += 1
+                except Exception as e:
+                    print(f"Error Scout {coin} {stf}: {type(e).__name__}: {e}")
 
         # ----- OTE (Textbook Setup) pass: fire on the last-closed-bar limit fill,
         #  optionally gated by higher-timeframe structure (4h gated by 12h). -----
@@ -822,6 +913,9 @@ Price: {best['price']}
         print(message)
     else:
         print("No new positions this scan - nothing to alert (dedup working).")
+
+    if ENABLE_CRT_SCOUT:
+        print(f"CRT-Scout: {scout_count} new setup(s) sent for approval this scan.")
 
 
 # Loop forever only when run directly (python agent.py) — e.g. as a 24/7
