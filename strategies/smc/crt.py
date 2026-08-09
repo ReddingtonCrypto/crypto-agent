@@ -146,8 +146,8 @@ def detect_crt_setup(df, kl_lookback=KL_LOOKBACK, min_confluence=1, min_rr=1.0):
             "regime": "range" if trend is None else "with-trend"}
 
 
-def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
-                     level_lookback=60, min_age=6, kl_lookback=KL_LOOKBACK):
+def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=10,
+                     level_lookback=120, min_age=12, kl_lookback=KL_LOOKBACK):
     """SCOUT detector — a REAL liquidity-sweep CRT you can validate on the chart.
 
     The last CLOSED candle must sweep a GENUINE prior SWING high/low (a level
