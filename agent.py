@@ -95,7 +95,13 @@ SCOUT_TFS = ["1w", "1d", "4h"]
 # STACK for an alert. 1 = any single key level (~30% of candles — the widest
 # feed). 2 = A+ only (~6%, far fewer). Tune here without touching anything else.
 SCOUT_MIN_CONFLUENCE = 1
+# Minimum reward:risk (entry->TP2 vs entry->stop) for a setup to be proposed.
+# 1.0 = never propose a sub-1:1 trade.
+SCOUT_MIN_RR = 1.0
 SCOUT_STRATEGY = "CRT"
+# Timeframe weight for resolving a same-coin LONG-vs-SHORT clash in one scan
+# (higher timeframe wins; confluence breaks ties).
+SCOUT_TF_WEIGHT = {"1w": 3, "1d": 2, "4h": 1}
 
 # OTE / "Textbook Setup" (ICT-2022) — the SEPARATE 3rd strategy (distinct from
 # ICT and CRT). Sweep -> displacement+MSS -> retrace into the 0.705-0.786 OTE
@@ -472,15 +478,19 @@ def _plain(tag):
 def _scout_alert_text(coin, tf, s):
     """Compact, scannable Telegram body for a CRT setup awaiting approval."""
     risk = abs(s["entry"] - s["stop"])
-    rr = abs(s["tp2"] - s["entry"]) / risk if risk else 0.0
+    rr = s.get("rr") or (abs(s["tp2"] - s["entry"]) / risk if risk else 0.0)
     arrow = "🟢 LONG" if s["direction"] == "LONG" else "🔴 SHORT"
+    conf = s["confluence"]
+    conf_line = (f"⭐ <b>A+</b> · {conf} key levels: {s['key_level']}"
+                 if conf > 1 else f"🔑 1 key level: {s['key_level']}")
     return (
         f"📊 <b>CRT</b> · <b>{coin}</b> · {tf}  {arrow}\n"
         f"<code>Entry {s['entry']:.6g}</code>\n"
         f"<code>Stop  {s['stop']:.6g}</code>\n"
         f"<code>TP1   {s['tp1']:.6g}</code>\n"
         f"<code>TP2   {s['tp2']:.6g}</code>\n"
-        f"🔑 {s['key_level']} (×{s['confluence']})   R:R ≈ {rr:.1f}"
+        f"{conf_line}\n"
+        f"R:R ≈ {rr:.1f}"
     )
 
 
@@ -575,24 +585,39 @@ def run_agent():
         #  (the user's own method, reversal direction, no trend filter). Saves a
         #  PENDING paper trade + sends Approve/Skip buttons; never auto-opens. -----
         if ENABLE_CRT_SCOUT:
+            found = []                                  # (tf, setup) across scout TFs
             for stf in SCOUT_TFS:
                 try:
                     sdf = _closed_df(coin, stf, per_tf)
                     if sdf is None:
                         continue
-                    setup = detect_crt_scout(sdf, min_confluence=SCOUT_MIN_CONFLUENCE)
-                    if not setup:
-                        continue
-                    pid = paper_trading.create_pending(
-                        coin, setup["direction"], setup["entry"], setup["stop"],
-                        setup["tp1"], setup["tp2"], setup["confluence"], stf,
-                        SCOUT_STRATEGY, signal_ts=setup["signal_ts"])
-                    if pid is None:
-                        continue                       # already proposed this candle
-                    if telegram_approve.send_approval(pid, _scout_alert_text(coin, stf, setup)):
-                        scout_count += 1
+                    setup = detect_crt_scout(
+                        sdf, min_confluence=SCOUT_MIN_CONFLUENCE, min_rr=SCOUT_MIN_RR)
+                    if setup:
+                        found.append((stf, setup))
                 except Exception as e:
                     print(f"Error Scout {coin} {stf}: {type(e).__name__}: {e}")
+            # Sanity: never propose the same coin LONG *and* SHORT at once. If both
+            # directions appear across TFs, keep only the direction of the
+            # strongest setup (higher timeframe first, then higher confluence).
+            if found:
+                strongest = max(found, key=lambda x: (
+                    SCOUT_TF_WEIGHT.get(x[0], 0), x[1]["confluence"]))
+                keep_dir = strongest[1]["direction"]
+                for stf, setup in found:
+                    if setup["direction"] != keep_dir:
+                        continue                        # drop the conflicting side
+                    try:
+                        pid = paper_trading.create_pending(
+                            coin, setup["direction"], setup["entry"], setup["stop"],
+                            setup["tp1"], setup["tp2"], setup["confluence"], stf,
+                            SCOUT_STRATEGY, signal_ts=setup["signal_ts"])
+                        if pid is None:
+                            continue                    # already proposed this candle
+                        if telegram_approve.send_approval(pid, _scout_alert_text(coin, stf, setup)):
+                            scout_count += 1
+                    except Exception as e:
+                        print(f"Error Scout {coin} {stf}: {type(e).__name__}: {e}")
 
         # ----- OTE (Textbook Setup) pass: fire on the last-closed-bar limit fill,
         #  optionally gated by higher-timeframe structure (4h gated by 12h). -----
@@ -669,6 +694,18 @@ def run_agent():
             asyncio.run(send_alert(
                 f"{emoji} TP1 HIT — half banked  {t['coin']}  {t['direction']}  ({tf})\n"
                 f"Locked: +{t['pnl_pct']}%  ·  runner to TP2, stop at break-even"
+            ))
+        elif mark == "FILLED":
+            strat = t.get("strategy", "")
+            print(f"Limit filled: {t['coin']} {t['direction']} {tf} — now tracking")
+            asyncio.run(send_alert(
+                f"▶️ FILLED — now tracking  {t['coin']}  {t['direction']}  ({tf}) {strat}"
+            ))
+        elif mark == "CANCELLED":
+            strat = t.get("strategy", "")
+            print(f"Limit cancelled (unfilled): {t['coin']} {t['direction']} {tf}")
+            asyncio.run(send_alert(
+                f"🚫 CANCELLED — limit never filled  {t['coin']}  {t['direction']}  ({tf}) {strat}"
             ))
         else:
             reason = t.get("reason")

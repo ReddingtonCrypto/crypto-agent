@@ -170,37 +170,64 @@ def get_pending(pending_id):
     return dict(zip(keys, row))
 
 
-def approve_pending(pending_id):
-    """Human approved a PENDING setup -> promote it to OPEN and start tracking
-    (opened_at set now). Returns the trade dict on success, or None if it wasn't
-    pending or a live OPEN duplicate already exists. Idempotent: a second approve
-    press does nothing."""
+def approve_pending(pending_id, current_price=None):
+    """Human approved a PENDING setup. Decides MARKET vs LIMIT entry from the
+    current price:
+      * MARKET — price is already at/through the entry level in our favour
+        (LONG: price <= entry; SHORT: price >= entry). Opens NOW, and the tracked
+        entry becomes the ACTUAL current price at approval (what the dashboard
+        shows).
+      * LIMIT  — price hasn't reached the entry yet. Goes to WAITING; it only
+        becomes a tracked OPEN trade once price touches the entry (handled in
+        update_open_trades), filled at the entry level.
+    Returns the trade dict (with extra keys mode='market'|'limit', fill_price) on
+    success, or None if it wasn't pending / a live duplicate exists. Idempotent."""
     conn = _conn()
     row = conn.execute(
-        "SELECT coin, direction, timeframe, strategy, status FROM paper_trades WHERE id=?",
+        "SELECT coin, direction, timeframe, strategy, status, entry FROM paper_trades WHERE id=?",
         (pending_id,),
     ).fetchone()
     if not row or row[4] != "PENDING":
         conn.close()
         return None
-    coin, direction, timeframe, strategy, _ = row
-    open_dupe = conn.execute(
+    coin, direction, timeframe, strategy, _, entry = row
+    dupe = conn.execute(
         "SELECT 1 FROM paper_trades WHERE coin=? AND direction=? AND timeframe=? "
-        "AND strategy=? AND status='OPEN' LIMIT 1",
+        "AND strategy=? AND status IN ('OPEN','WAITING') LIMIT 1",
         (coin, direction, timeframe, strategy),
     ).fetchone()
-    if open_dupe:
+    if dupe:
         conn.execute("UPDATE paper_trades SET status='SKIPPED' WHERE id=?", (pending_id,))
         conn.commit()
         conn.close()
         return None
-    conn.execute(
-        "UPDATE paper_trades SET status='OPEN', opened_at=? WHERE id=?",
-        (_now(), pending_id),
-    )
+
+    mode = "market"
+    fill_price = entry
+    if current_price is not None and entry:
+        at_or_better = (current_price <= entry) if direction == "LONG" else (current_price >= entry)
+        if at_or_better:
+            mode, fill_price = "market", float(current_price)
+        else:
+            mode = "limit"
+
+    if mode == "market":
+        conn.execute(
+            "UPDATE paper_trades SET status='OPEN', entry=?, opened_at=? WHERE id=?",
+            (fill_price, _now(), pending_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE paper_trades SET status='WAITING', opened_at=? WHERE id=?",
+            (_now(), pending_id),
+        )
     conn.commit()
     conn.close()
-    return get_pending(pending_id)
+    d = get_pending(pending_id)
+    if d:
+        d["mode"] = mode
+        d["fill_price"] = fill_price if mode == "market" else entry
+    return d
 
 
 def reject_pending(pending_id):
@@ -329,15 +356,44 @@ def update_open_trades(bars):
                 "pnl_pct": total, "timeframe": timeframe, "strategy": strategy,
             })
 
+    # ---- Fills: promote WAITING (limit) trades to OPEN when price arrives, or
+    #      cancel them if they wait past the time-stop without filling. ----
+    waiting = conn.execute(
+        "SELECT id, coin, direction, entry, timeframe, opened_at, strategy "
+        "FROM paper_trades WHERE status='WAITING'"
+    ).fetchall()
+    for (tid, coin, direction, entry, timeframe, opened_at, strategy) in waiting:
+        bar = bars.get(coin)
+        if bar is None or not entry:
+            continue
+        filled = (bar["low"] <= entry) if direction == "LONG" else (bar["high"] >= entry)
+        if filled:
+            conn.execute(
+                "UPDATE paper_trades SET status='OPEN', opened_at=? WHERE id=?",
+                (_now(), tid),
+            )
+            events.append({"coin": coin, "direction": direction, "result": "FILLED",
+                           "pnl_pct": 0.0, "timeframe": timeframe, "strategy": strategy})
+        elif _expired(opened_at, timeframe):
+            conn.execute(
+                "UPDATE paper_trades SET status='CANCELLED', closed_at=? WHERE id=?",
+                (_now(), tid),
+            )
+            events.append({"coin": coin, "direction": direction, "result": "CANCELLED",
+                           "pnl_pct": 0.0, "timeframe": timeframe, "strategy": strategy})
+
     conn.commit()
     conn.close()
-    return events  # partial-bank + full-close events
+    return events  # partial-bank + full-close + fill/cancel events
 
 
 def get_stats():
     conn = _conn()
     open_count = conn.execute(
         "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
+    ).fetchone()[0]
+    waiting = conn.execute(
+        "SELECT COUNT(*) FROM paper_trades WHERE status='WAITING'"
     ).fetchone()[0]
     wins = conn.execute(
         "SELECT COUNT(*) FROM paper_trades WHERE status='WIN'"
@@ -358,6 +414,7 @@ def get_stats():
 
     return {
         "open": open_count,
+        "waiting": waiting,
         "closed": closed,
         "wins": wins,
         "losses": losses,

@@ -146,7 +146,7 @@ def detect_crt_setup(df, kl_lookback=KL_LOOKBACK, min_confluence=1, min_rr=1.0):
             "regime": "range" if trend is None else "with-trend"}
 
 
-def detect_crt_scout(df, min_confluence=1, kl_lookback=KL_LOOKBACK):
+def detect_crt_scout(df, min_confluence=1, min_rr=1.0, kl_lookback=KL_LOOKBACK):
     """SCOUT detector for the human-approval flow — the user's own method:
     a CRT on the last CLOSED candle (C2 sweeps C1's high/low AND closes back
     inside), sitting at key-level confluence (FVG / old high-low / rejection
@@ -155,8 +155,10 @@ def detect_crt_scout(df, min_confluence=1, kl_lookback=KL_LOOKBACK):
     to approve; it does NOT auto-open.
 
     Entry = C2 close. Stop = C2's swept extreme. TP1 = 50% of the C1 range,
-    TP2 = the opposite C1 extreme (the draw-on-liquidity). Returns
-    {direction, entry, stop, tp1, tp2, key_level, confluence, signal_ts} or None.
+    TP2 = the opposite C1 extreme (the draw-on-liquidity). Only setups whose
+    reward:risk to TP2 is at least `min_rr` are returned. Returns
+    {direction, entry, stop, tp1, tp2, rr, key_level, confluence, signal_ts}
+    or None.
     """
     if len(df) < max(kl_lookback + 3, 45):
         return None
@@ -188,8 +190,13 @@ def detect_crt_scout(df, min_confluence=1, kl_lookback=KL_LOOKBACK):
             return None
         tp1 = mid if mid < entry else (entry + opp) / 2.0
 
+    risk = abs(entry - stop)
+    rr = abs(opp - entry) / risk if risk else 0.0
+    if rr < min_rr:                       # skip poor reward:risk setups
+        return None
+
     return {"direction": direction, "entry": entry, "stop": stop,
-            "tp1": float(tp1), "tp2": float(opp),
+            "tp1": float(tp1), "tp2": float(opp), "rr": round(rr, 2),
             "key_level": " + ".join(labels) or "key level", "confluence": cnt,
             "signal_ts": int(c2.timestamp)}
 

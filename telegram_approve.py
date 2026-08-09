@@ -90,16 +90,37 @@ def _clear_buttons(chat_id, message_id, note):
         pass
 
 
+_EXCHANGE = None
+
+
+def _current_price(coin):
+    """Live last price for the market/limit decision. None on failure."""
+    global _EXCHANGE
+    try:
+        if _EXCHANGE is None:
+            from data_source import make_exchange
+            _EXCHANGE = make_exchange()
+        t = _EXCHANGE.fetch_ticker(coin)
+        return float(t.get("last") or t.get("close"))
+    except Exception:
+        return None
+
+
 def _handle(action, pid):
     """Act on one button press: update the DB and send a confirmation."""
     info = paper_trading.get_pending(pid)
     tag = f"{info['coin']} {info['direction']} ({info['timeframe']})" if info else f"#{pid}"
     if action == "appr":
-        tr = paper_trading.approve_pending(pid)
-        if tr:
-            send_message(f"✅ Now tracking <b>{tag}</b> — CRT. It's on the scoreboard.")
+        price = _current_price(info["coin"]) if info else None
+        tr = paper_trading.approve_pending(pid, current_price=price)
+        if tr and tr.get("mode") == "market":
+            send_message(f"✅ <b>{tag}</b> entered at MARKET — "
+                         f"<code>{tr['fill_price']:.6g}</code>. Tracking now.")
+        elif tr and tr.get("mode") == "limit":
+            send_message(f"⏳ <b>{tag}</b> — LIMIT set @ <code>{tr['fill_price']:.6g}</code>. "
+                         f"Waiting for price to reach it before it starts tracking.")
         else:
-            send_message(f"⚠️ Couldn't open <b>{tag}</b> — already open or no longer pending.")
+            send_message(f"⚠️ Couldn't open <b>{tag}</b> — already open/waiting or no longer pending.")
     else:
         if paper_trading.reject_pending(pid):
             send_message(f"❌ Skipped <b>{tag}</b>.")
