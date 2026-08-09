@@ -78,22 +78,24 @@ TIMEFRAMES = [
 # trend, at a key level. Backtest: +0.25%/tr, 72% win, both walk-forward halves
 # positive, broad across the universe. DAILY ONLY (4h/12h tested negative, no TF
 # alignment). Paper forward-test. See memory/crt-enhancement-research.md.
-ENABLE_CRT = True
+# Auto daily-CRT model PAUSED: superseded by the human-approval CRT scanner
+# below, so the "CRT" scoreboard reflects only the setups the user approves (not
+# auto-opened ones). Flip back to True to resume the auto daily model in parallel.
+ENABLE_CRT = False
 
-# CRT-Scout: the human-approval scanner. Each scan, across SCOUT_TFS, it finds a
-# CRT on the last closed candle at key-level confluence (the user's own method,
-# reversal direction, NO trend filter), saves it as a PENDING paper trade, and
-# sends it to Telegram with Approve/Skip buttons. Approving flips it to a tracked
-# OPEN trade under the "CRT-Scout" strategy; skipping drops it. The auto CRT model
-# above keeps running independently. All paper.
+# CRT (human-approval scanner) — the refined CRT. Each scan, across SCOUT_TFS, it
+# finds a CRT on the last closed candle at key-level confluence (the user's own
+# method: reversal direction, NO trend filter), saves it as a PENDING paper
+# trade, and sends it to Telegram with Approve/Skip buttons. Approving flips it to
+# a tracked OPEN trade under the "CRT" strategy; skipping drops it. Button presses
+# are handled in real time by the separate telegram_approve listener service.
 ENABLE_CRT_SCOUT = True
 SCOUT_TFS = ["1w", "1d", "4h"]
-# Confluence gate for an alert: how many key levels (FVG / old high-low /
-# rejection block) must STACK. 2 = A+ only (~6% of candles, ~20 alerts/day — a
-# reviewable feed). Set to 1 for every single-key-level CRT (~30% of candles,
-# ~100/day — a flood). Tune here without touching anything else.
-SCOUT_MIN_CONFLUENCE = 2
-SCOUT_STRATEGY = "CRT-Scout"
+# Confluence gate: how many key levels (FVG / old high-low / rejection block) must
+# STACK for an alert. 1 = any single key level (~30% of candles — the widest
+# feed). 2 = A+ only (~6%, far fewer). Tune here without touching anything else.
+SCOUT_MIN_CONFLUENCE = 1
+SCOUT_STRATEGY = "CRT"
 
 # OTE / "Textbook Setup" (ICT-2022) — the SEPARATE 3rd strategy (distinct from
 # ICT and CRT). Sweep -> displacement+MSS -> retrace into the 0.705-0.786 OTE
@@ -468,49 +470,18 @@ def _plain(tag):
 
 
 def _scout_alert_text(coin, tf, s):
-    """Telegram body for a CRT-Scout setup awaiting approval."""
-    d = s["direction"]
+    """Compact, scannable Telegram body for a CRT setup awaiting approval."""
     risk = abs(s["entry"] - s["stop"])
     rr = abs(s["tp2"] - s["entry"]) / risk if risk else 0.0
-    arrow = "🟢 LONG" if d == "LONG" else "🔴 SHORT"
+    arrow = "🟢 LONG" if s["direction"] == "LONG" else "🔴 SHORT"
     return (
-        f"🔎 <b>CRT-Scout</b> — approve to track\n\n"
-        f"<b>{coin}</b> · {tf} · {arrow}\n"
-        f"Key level: {s['key_level']} (confluence {s['confluence']})\n\n"
-        f"Entry: <code>{s['entry']:.6g}</code>\n"
-        f"Stop:  <code>{s['stop']:.6g}</code>\n"
-        f"TP1 (50%): <code>{s['tp1']:.6g}</code>\n"
-        f"TP2 (opp): <code>{s['tp2']:.6g}</code>\n"
-        f"R:R to TP2 ≈ {rr:.1f}\n\n"
-        f"✅ Approve = open a tracked paper trade · ❌ Skip = ignore"
+        f"📊 <b>CRT</b> · <b>{coin}</b> · {tf}  {arrow}\n"
+        f"<code>Entry {s['entry']:.6g}</code>\n"
+        f"<code>Stop  {s['stop']:.6g}</code>\n"
+        f"<code>TP1   {s['tp1']:.6g}</code>\n"
+        f"<code>TP2   {s['tp2']:.6g}</code>\n"
+        f"🔑 {s['key_level']} (×{s['confluence']})   R:R ≈ {rr:.1f}"
     )
-
-
-def process_approvals():
-    """Read Telegram button presses and act on them: Approve -> promote the
-    PENDING paper trade to a tracked OPEN one; Skip -> mark it SKIPPED. Sends a
-    short confirmation for each. Safe to call every scan."""
-    try:
-        decisions = telegram_approve.poll_decisions()
-    except Exception as e:
-        print(f"approval poll failed: {type(e).__name__}: {e}")
-        return
-    for action, pid in decisions:
-        try:
-            if action == "appr":
-                tr = paper_trading.approve_pending(pid)
-                if tr:
-                    asyncio.run(send_alert(
-                        f"✅ Tracking {tr['coin']} {tr['direction']} "
-                        f"({tr['timeframe']}, CRT-Scout) — now on the scoreboard."))
-                else:
-                    asyncio.run(send_alert(
-                        f"⚠️ Setup #{pid} could not be opened (already open or expired)."))
-            else:
-                if paper_trading.reject_pending(pid):
-                    asyncio.run(send_alert(f"❌ Skipped setup #{pid}."))
-        except Exception as e:
-            print(f"approval action failed for #{pid}: {type(e).__name__}: {e}")
 
 
 def run_agent():
@@ -519,10 +490,6 @@ def run_agent():
     print("Scanning market...")
     print(datetime.now())
     print("==============================\n")
-
-    # First, action any Approve/Skip button presses since the last scan.
-    if ENABLE_CRT_SCOUT:
-        process_approvals()
 
     # Live universe: blend of market cap + Binance 24h volume + sector heat
     # (liquidity/narrative). Fails soft to plain market-cap order.
@@ -915,7 +882,7 @@ Price: {best['price']}
         print("No new positions this scan - nothing to alert (dedup working).")
 
     if ENABLE_CRT_SCOUT:
-        print(f"CRT-Scout: {scout_count} new setup(s) sent for approval this scan.")
+        print(f"CRT: {scout_count} new setup(s) sent for approval this scan.")
 
 
 # Loop forever only when run directly (python agent.py) — e.g. as a 24/7

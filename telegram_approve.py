@@ -1,29 +1,27 @@
-"""Interactive Telegram approval for CRT-Scout setups.
+"""Interactive Telegram approval for CRT setups — real-time listener.
 
-The one-way `send_alert` in signal_pipeline can only PUSH messages. This adds the
-missing half: send a setup with ✅ Approve / ❌ Skip buttons, and read the human's
-button press back via getUpdates (long-poll, no webhook needed). Uses the raw Bot
-API over `requests` so it stays independent of the async python-telegram-bot flow
-the rest of the agent uses.
+Two halves:
+  * send_approval(pending_id, text)  — the scan (agent.py) posts a setup with
+    ✅ Approve / ❌ Skip buttons.
+  * run_listener()                   — a SEPARATE long-running process (its own
+    systemd service) that long-polls getUpdates and acts on a button press
+    within a second or two: Approve -> promote the PENDING paper trade to a
+    tracked OPEN one and reply; Skip -> mark it SKIPPED and reply.
 
-Flow:
-  send_approval(pending_id, text)      -> posts the setup with two buttons
-  poll_decisions()                     -> returns [(action, pending_id), ...] for
-                                          every button pressed since last poll,
-                                          answers the callback + clears the buttons
-
-The update offset is persisted in database/tg_offset.txt so a restart never
-re-reads old presses. All paper — approving only flips a PENDING paper trade to
-OPEN on the scoreboard.
+Only ONE process may consume getUpdates for a bot, so the listener is the single
+consumer — the scan loop no longer polls. Uses the raw Bot API over `requests`,
+independent of the async python-telegram-bot flow used elsewhere. All paper.
 """
 import os
+import time
+
 import requests
 
 from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+import paper_trading
 
 _API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 _OFFSET_FILE = "database/tg_offset.txt"
-_TIMEOUT = 15
 
 
 def _read_offset():
@@ -40,23 +38,32 @@ def _write_offset(update_id):
         f.write(str(update_id))
 
 
+def send_message(text):
+    """Plain HTML message (confirmations). Returns True on success."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    try:
+        r = requests.post(f"{_API}/sendMessage",
+                          json={"chat_id": TELEGRAM_CHAT_ID, "text": text,
+                                "parse_mode": "HTML"}, timeout=20)
+        return r.ok
+    except requests.RequestException:
+        return False
+
+
 def send_approval(pending_id, text):
     """Post a setup with Approve / Skip buttons. Returns True on success."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return False
-    keyboard = {
-        "inline_keyboard": [[
-            {"text": "✅ Approve", "callback_data": f"appr:{pending_id}"},
-            {"text": "❌ Skip", "callback_data": f"skip:{pending_id}"},
-        ]]
-    }
+    keyboard = {"inline_keyboard": [[
+        {"text": "✅ Approve", "callback_data": f"appr:{pending_id}"},
+        {"text": "❌ Skip", "callback_data": f"skip:{pending_id}"},
+    ]]}
     try:
-        r = requests.post(
-            f"{_API}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text,
-                  "parse_mode": "HTML", "reply_markup": keyboard},
-            timeout=_TIMEOUT,
-        )
+        r = requests.post(f"{_API}/sendMessage",
+                          json={"chat_id": TELEGRAM_CHAT_ID, "text": text,
+                                "parse_mode": "HTML", "reply_markup": keyboard},
+                          timeout=20)
         return r.ok
     except requests.RequestException:
         return False
@@ -66,44 +73,56 @@ def _answer(callback_id, text):
     try:
         requests.post(f"{_API}/answerCallbackQuery",
                       json={"callback_query_id": callback_id, "text": text},
-                      timeout=_TIMEOUT)
+                      timeout=20)
     except requests.RequestException:
         pass
 
 
-def _clear_buttons(chat_id, message_id, suffix):
-    """Remove the buttons and append the decision to the original message so the
-    Telegram history shows what was chosen."""
+def _clear_buttons(chat_id, message_id, note):
+    """Remove the buttons and stamp the decision onto the original message."""
+    if chat_id is None or message_id is None:
+        return
     try:
         requests.post(f"{_API}/editMessageReplyMarkup",
                       json={"chat_id": chat_id, "message_id": message_id,
-                            "reply_markup": {"inline_keyboard": []}},
-                      timeout=_TIMEOUT)
+                            "reply_markup": {"inline_keyboard": []}}, timeout=20)
     except requests.RequestException:
         pass
 
 
-def poll_decisions():
-    """Fetch button presses since the last poll. Returns [(action, pending_id)]
-    where action is 'appr' or 'skip'. Answers each callback and clears its
-    buttons. Non-blocking-ish (short long-poll)."""
+def _handle(action, pid):
+    """Act on one button press: update the DB and send a confirmation."""
+    info = paper_trading.get_pending(pid)
+    tag = f"{info['coin']} {info['direction']} ({info['timeframe']})" if info else f"#{pid}"
+    if action == "appr":
+        tr = paper_trading.approve_pending(pid)
+        if tr:
+            send_message(f"✅ Now tracking <b>{tag}</b> — CRT. It's on the scoreboard.")
+        else:
+            send_message(f"⚠️ Couldn't open <b>{tag}</b> — already open or no longer pending.")
+    else:
+        if paper_trading.reject_pending(pid):
+            send_message(f"❌ Skipped <b>{tag}</b>.")
+
+
+def poll_once(timeout=25):
+    """Long-poll getUpdates once and act on every button press. Returns the
+    number of decisions handled."""
     if not TELEGRAM_TOKEN:
-        return []
+        return 0
     offset = _read_offset()
     try:
-        r = requests.get(
-            f"{_API}/getUpdates",
-            params={"offset": offset + 1, "timeout": 0,
-                    "allowed_updates": '["callback_query"]'},
-            timeout=_TIMEOUT,
-        )
+        r = requests.get(f"{_API}/getUpdates",
+                         params={"offset": offset + 1, "timeout": timeout,
+                                 "allowed_updates": '["callback_query"]'},
+                         timeout=timeout + 10)
         data = r.json()
     except (requests.RequestException, ValueError):
-        return []
+        return 0
     if not data.get("ok"):
-        return []
+        return 0
 
-    decisions = []
+    handled = 0
     last_id = offset
     for upd in data.get("result", []):
         last_id = max(last_id, upd["update_id"])
@@ -113,18 +132,35 @@ def poll_decisions():
         payload = cq.get("data", "")
         cb_id = cq.get("id")
         msg = cq.get("message", {})
-        if ":" not in payload:
-            _answer(cb_id, "unrecognised")
-            continue
         action, _, pid = payload.partition(":")
         if action not in ("appr", "skip") or not pid.isdigit():
             _answer(cb_id, "unrecognised")
             continue
-        decisions.append((action, int(pid)))
         _answer(cb_id, "Approved ✅" if action == "appr" else "Skipped ❌")
-        if msg:
-            _clear_buttons(msg.get("chat", {}).get("id"), msg.get("message_id"),
-                           action)
+        _clear_buttons(msg.get("chat", {}).get("id"), msg.get("message_id"), action)
+        try:
+            _handle(action, int(pid))
+        except Exception as e:
+            print(f"handle {action} #{pid} failed: {type(e).__name__}: {e}", flush=True)
+        handled += 1
     if last_id != offset:
         _write_offset(last_id)
-    return decisions
+    return handled
+
+
+def run_listener():
+    """Forever: long-poll for button presses and act on them in near real time.
+    Run as its own systemd service (the single getUpdates consumer)."""
+    print("CRT approval listener started (long-poll).", flush=True)
+    while True:
+        try:
+            n = poll_once(timeout=25)
+            if n:
+                print(f"handled {n} decision(s)", flush=True)
+        except Exception as e:
+            print(f"listener loop error: {type(e).__name__}: {e}", flush=True)
+            time.sleep(5)
+
+
+if __name__ == "__main__":
+    run_listener()
