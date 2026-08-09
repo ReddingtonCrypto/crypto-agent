@@ -1,5 +1,5 @@
 def calculate_trade(price, direction, atr, strategy="Trend", stop_level=None,
-                    target_level=None):
+                    target_level=None, tp1_level=None):
     """Entry, stop and targets.
 
     If `stop_level` is given (ICT: the swept liquidity level), the stop is
@@ -13,6 +13,16 @@ def calculate_trade(price, direction, atr, strategy="Trend", stop_level=None,
     and the single target is C1's body — no ATR sizing, no partial ladder.
     """
     entry = price
+
+    # ----- Enhanced CRT: fully explicit PRICE targets (TP1 = 50% of the range,
+    #  TP2 = opposite extreme), no R:R, no ATR. Stop = C2's swept extreme. -----
+    if tp1_level is not None and stop_level is not None and target_level is not None:
+        return {
+            "entry": round(entry, 8),
+            "stop": round(float(stop_level), 8),
+            "tp1": round(float(tp1_level), 8),      # 50% of the CRT range (bank 50% + BE)
+            "tp2": round(float(target_level), 8),   # opposite extreme (runner)
+        }
 
     # ----- CRT and OTE: explicit stop + the group's risk management (bank 50%
     #  at 2R, move SL to break-even, let the runner go to the target level —

@@ -17,6 +17,8 @@ detect_crt(df) takes CLOSED candles and reads the last one as C2, the prior as
 C1. Returns {direction, stop, target, key_level} or None.
 """
 
+import bisect
+
 from strategies.smc.market_structure import find_swings
 from strategies.smc import key_levels
 
@@ -94,6 +96,135 @@ def detect_crt(df, kl_lookback=KL_LOOKBACK):
 
     return {"direction": direction, "stop": stop, "target": target,
             "key_level": key_level}
+
+
+def detect_crt_setup(df, kl_lookback=KL_LOOKBACK, min_confluence=1, min_rr=1.0):
+    """HTF CRT SETUP for the live feed — the way the group actually trades it:
+    fire the moment a valid CRT prints on the LAST closed HTF candle, with the
+    full textbook trade plan, RELAXED from the strict aligned model so it catches
+    the setups the group takes:
+      * ranges are ALLOWED — only a CLEARLY OPPOSITE market-structure trend is
+        rejected (the group trades CRT in ranges, e.g. LTC off a swept range low);
+      * needs >= min_confluence key levels (default 1, not the A+ 2);
+      * no lower-timeframe fill requirement — you get the alert when the setup
+        forms and take the entry with your own judgement (the discretion is the
+        edge). Textbook plan: enter at C2 close, stop = C2's protected extreme,
+        target = C1 body (the shared 2R-partial + BE runner books it).
+    Returns {direction, entry, stop, target, key_level, confluence} or None.
+    """
+    if len(df) < max(kl_lookback + 3, 30):
+        return None
+    c1 = df.iloc[-2]
+    c2 = df.iloc[-1]
+    if c2.high > c1.high and c1.low <= c2.close <= c1.high:
+        direction = "SHORT"; stop = float(c2.high); target = float(min(c1.open, c1.close))
+    elif c2.low < c1.low and c1.low <= c2.close <= c1.high:
+        direction = "LONG"; stop = float(c2.low); target = float(max(c1.open, c1.close))
+    else:
+        return None
+
+    highs, lows = find_swings(df, lookback=2)
+    trend = _trend(highs, lows)
+    if trend is not None and trend != direction:
+        return None                      # don't fight a CLEAR opposite trend; ranges OK
+
+    i = len(df) - 1
+    cnt, labels = key_levels.count_key_levels(df, i, direction, swings=(highs, lows))
+    if cnt < min_confluence:
+        return None
+
+    entry = float(c2.close)
+    if direction == "SHORT" and target >= entry:
+        return None
+    if direction == "LONG" and target <= entry:
+        return None
+    risk = abs(entry - stop)
+    if risk <= 0 or abs(target - entry) / risk < min_rr:
+        return None                      # skip objectively poor R:R to the C1 body
+    return {"direction": direction, "entry": entry, "stop": stop, "target": target,
+            "key_level": " + ".join(labels) or "key level", "confluence": cnt,
+            "regime": "range" if trend is None else "with-trend"}
+
+
+def _smt_confirms(df, ref_df, i, direction):
+    """SMT (cross-asset divergence): at the C2 bar, did the REFERENCE asset NOT
+    sweep the same way? (divergence in the CRT's favour). Aligns by timestamp.
+    Returns False if no aligned reference bar (can't confirm)."""
+    if ref_df is None:
+        return False
+    ts_i = int(df["timestamp"].iloc[i])
+    rts = ref_df["timestamp"].to_numpy().tolist()
+    j = bisect.bisect_left(rts, ts_i)
+    if j >= len(rts) or int(rts[j]) != ts_i or j < 1:
+        return False
+    rlo = ref_df["low"].to_numpy(); rhi = ref_df["high"].to_numpy()
+    if direction == "LONG":
+        return not (rlo[j] < rlo[j - 1])     # coin swept its low; ref did NOT
+    return not (rhi[j] > rhi[j - 1])          # coin swept its high; ref did NOT
+
+
+def detect_crt_enhanced(df, ref_df=None, kl_lookback=KL_LOOKBACK):
+    """The VALIDATED enhanced DAILY CRT (backtest: +0.25%/tr, 72% win, both
+    walk-forward halves positive, broad). Fires on the LAST CLOSED candle (=C3)
+    when a full confirmed setup is present:
+      C1 (=-3) range -> C2 (=-2) sweeps C1's high/low AND closes back inside ->
+      C3 (=-1) CONFIRMS by closing beyond C2's body in the trade direction ->
+      with-trend (market structure) + at a key level + SMT-confirmed (BTC/ETH).
+    Entry = C3 close; stop = C2's swept extreme; TP1 = 50% of C1's range (bank
+    50% + move to break-even); TP2 = the OPPOSITE extreme of C1's range. No R:R,
+    no timeframe alignment — daily only. Returns the trade dict or None.
+    """
+    if len(df) < max(kl_lookback + 4, 34):
+        return None
+    c1 = df.iloc[-3]; c2 = df.iloc[-2]; c3 = df.iloc[-1]
+    c1_hi = float(c1.high); c1_lo = float(c1.low)
+
+    # C2 = a valid CRT of C1 (sweep + close back inside)
+    if c2.high > c1_hi and c1_lo <= c2.close <= c1_hi:
+        direction, stop = "SHORT", float(c2.high)
+    elif c2.low < c1_lo and c1_lo <= c2.close <= c1_hi:
+        direction, stop = "LONG", float(c2.low)
+    else:
+        return None
+
+    # C3 confirmation: close beyond C2's body in the trade direction
+    c2_body_lo = min(float(c2.open), float(c2.close))
+    c2_body_hi = max(float(c2.open), float(c2.close))
+    if direction == "SHORT" and not (c3.close < c2_body_lo):
+        return None
+    if direction == "LONG" and not (c3.close > c2_body_hi):
+        return None
+
+    # with-trend (market structure)
+    highs, lows = find_swings(df, lookback=2)
+    if _trend(highs, lows) != direction:
+        return None
+
+    # at a key level (checked on the C2 sweep bar)
+    i2 = len(df) - 2
+    cnt, labels = key_levels.count_key_levels(df, i2, direction, swings=(highs, lows))
+    if cnt < 1:
+        return None
+
+    # SMT filter (compare the reference asset at the C2 bar)
+    if not _smt_confirms(df, ref_df, i2, direction):
+        return None
+
+    # targets from C1's range: TP1 = 50%, TP2 = opposite extreme
+    mid = (c1_hi + c1_lo) / 2.0
+    opp = c1_hi if direction == "LONG" else c1_lo
+    entry = float(c3.close)
+    mid_beyond = (mid > entry) if direction == "LONG" else (mid < entry)
+    tp1 = mid if mid_beyond else opp                  # if 50% already passed, run to opp
+    tp2 = opp
+    if direction == "LONG" and not (stop < entry < tp2):
+        return None
+    if direction == "SHORT" and not (tp2 < entry < stop):
+        return None
+
+    return {"direction": direction, "entry": entry, "stop": stop,
+            "tp1": tp1, "tp2": tp2, "key_level": " + ".join(labels) or "key level",
+            "confluence": cnt}
 
 
 def _at_key_level(df, i, direction, kl_lookback):

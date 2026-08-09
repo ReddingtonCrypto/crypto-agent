@@ -18,7 +18,7 @@ from market_filter import market_quality
 from strategies.smc.market_structure import detect_structure
 from strategies.smc.smc_features import analyze as smc_analyze
 from strategies.smc.ict_model import detect_ict, detect_mss
-from strategies.smc.crt import detect_crt_aligned
+from strategies.smc.crt import detect_crt_aligned, detect_crt_setup, detect_crt_enhanced
 from strategies.smc import ote as ote_lib
 from strategies.smc.ote import detect_ote_live, htf_bias as ote_htf_bias
 
@@ -62,10 +62,21 @@ TIMEFRAMES = [
 # stack (confluence), across ALL the higher timeframes, for the user to judge
 # and enter manually. Backtesting found no mechanical edge — the value is a
 # clean, filtered feed of the best setups; the human applies the judgement.
+# CRT now fires as an HTF SETUP the moment a valid Candle Range Theory candle
+# prints on a higher timeframe — the way the group actually trades it. Relaxed
+# from the old strict aligned model (which almost never fired): ranges allowed
+# (only a clearly opposite trend is rejected), confluence>=1 (not A+ 2), and NO
+# lower-timeframe fill requirement — you get the alert when the setup forms and
+# take the entry with your own judgement. Full textbook trade plan attached
+# (enter at C2 close, stop = C2 protected extreme, target = C1 body, 2R-partial
+# + BE runner). The old aligned engine (detect_crt_aligned) is retired from live.
+# CRT is now the RESEARCH-VALIDATED enhanced DAILY model (Anees/Romeo sources,
+# backtested step-by-step): classic CRT + C3 confirmation (wait for the next
+# daily candle) + 50%/opposite-extreme targets + SMT (BTC/ETH divergence), with-
+# trend, at a key level. Backtest: +0.25%/tr, 72% win, both walk-forward halves
+# positive, broad across the universe. DAILY ONLY (4h/12h tested negative, no TF
+# alignment). Paper forward-test. See memory/crt-enhancement-research.md.
 ENABLE_CRT = True
-CRT_MIN_CONFLUENCE = 2   # require >=2 key levels stacking (A+ only)
-CRT_PAIRS = [("1M", "1d"), ("1w", "4h"), ("1d", "1h"),
-             ("4h", "15m"), ("1h", "5m")]  # every HTF -> its aligned entry TF
 
 # OTE / "Textbook Setup" (ICT-2022) — the SEPARATE 3rd strategy (distinct from
 # ICT and CRT). Sweep -> displacement+MSS -> retrace into the 0.705-0.786 OTE
@@ -467,6 +478,9 @@ def run_agent():
 
     signals = []
     bar_map = {}
+    # CRT SMT reference: BTC & ETH daily candles (fetched once per scan).
+    crt_btc_1d = _closed_df("BTC/USDT", "1d", {}) if ENABLE_CRT else None
+    crt_eth_1d = _closed_df("ETH/USDT", "1d", {}) if ENABLE_CRT else None
     for coin in coins:
         # Analyse every timeframe for this coin first (so we have the
         # confirmation timeframe's direction on hand).
@@ -498,34 +512,29 @@ def run_agent():
                     sig["confirm"] = f"{ctf} agrees"
                 signals.append(sig)
 
-        # ----- CRT timeframe-aligned pass: HTF marks the setup, the aligned LTF
-        #  executes (sweep + single-candle CISD). One signal per fresh trigger. -----
+        # ----- CRT pass: the validated enhanced DAILY model (C3 confirmation +
+        #  50%/opposite targets + SMT). Fires once per confirmed daily setup. -----
         if ENABLE_CRT:
-            for htf, ltf in CRT_PAIRS:
-                try:
-                    htf_df = _closed_df(coin, htf, per_tf)
-                    ltf_df = _closed_df(coin, ltf, per_tf)
-                    if htf_df is None or ltf_df is None:
-                        continue
-                    crt = detect_crt_aligned(htf_df, ltf_df,
-                                             min_confluence=CRT_MIN_CONFLUENCE)
-                    if not crt:
-                        continue
-                    signals.append({
-                        "coin": coin, "timeframe": ltf, "horizon": f"{htf}→{ltf}",
-                        "strategy": "CRT", "direction": crt["direction"],
-                        "confidence": 80, "price": crt["entry"], "atr": 0.0,
-                        "stop_level": crt["stop"], "target_level": crt["target"],
-                        "key_level": crt["key_level"], "htf": htf, "ltf": ltf,
-                        # signal_ts = the LTF entry candle, so this setup opens
-                        # (and alerts) ONCE — not on every scan within the bar.
-                        "signal_ts": int(ltf_df["timestamp"].iloc[-1]),
-                        # defaults so shared print/alert paths don't KeyError
-                        "regime": "-", "quality": "STRONG", "rsi": 0.0,
-                        "vol_confirm": True, "smc": "-", "smc_features": [],
-                    })
-                except Exception as e:
-                    print(f"Error CRT {coin} {htf}->{ltf}: {type(e).__name__}: {e}")
+            try:
+                cdf = _closed_df(coin, "1d", per_tf)
+                ref = crt_eth_1d if coin == "BTC/USDT" else crt_btc_1d
+                if cdf is not None and ref is not None:
+                    crt = detect_crt_enhanced(cdf, ref_df=ref)
+                    if crt:
+                        signals.append({
+                            "coin": coin, "timeframe": "1d", "horizon": "Daily CRT",
+                            "strategy": "CRT", "direction": crt["direction"],
+                            "confidence": 80, "price": crt["entry"], "atr": 0.0,
+                            "stop_level": crt["stop"], "target_level": crt["tp2"],
+                            "tp1_level": crt["tp1"], "key_level": crt["key_level"],
+                            "crt_conf": crt["confluence"], "htf": "1d", "ltf": "1d",
+                            # signal_ts = the C3 (confirmation) daily candle.
+                            "signal_ts": int(cdf["timestamp"].iloc[-1]),
+                            "regime": "-", "quality": "STRONG", "rsi": 0.0,
+                            "vol_confirm": True, "smc": "-", "smc_features": [],
+                        })
+            except Exception as e:
+                print(f"Error CRT {coin}: {type(e).__name__}: {e}")
 
         # ----- OTE (Textbook Setup) pass: fire on the last-closed-bar limit fill,
         #  optionally gated by higher-timeframe structure (4h gated by 12h). -----
@@ -646,7 +655,7 @@ def run_agent():
 
         trade = calculate_trade(
             s["price"], s["direction"], s["atr"], s["strategy"], s.get("stop_level"),
-            s.get("target_level"),
+            s.get("target_level"), s.get("tp1_level"),
         )
         # open_trade returns False if a trade for this coin+direction+timeframe+
         # strategy is already open — so the SAME signal never re-fires, but the
@@ -684,7 +693,7 @@ def run_agent():
     best = qualified[0]
     trade = calculate_trade(
         best["price"], best["direction"], best["atr"], best["strategy"],
-        best.get("stop_level"), best.get("target_level"),
+        best.get("stop_level"), best.get("target_level"), best.get("tp1_level"),
     )
 
     print(
@@ -720,35 +729,32 @@ Price: {best['price']}
             action = "🟢 BUY" if s["direction"] == "LONG" else "🔴 SELL"
 
             if s["strategy"] == "CRT":
-                # A+ scanner card — plain English, percentages (no R:R ratios).
-                TFN = {"1M": "Monthly", "1w": "Weekly", "1d": "Daily", "4h": "4-hour",
-                       "1h": "1-hour", "15m": "15-min", "5m": "5-min",
-                       "12h": "12-hour", "30m": "30-min"}
-                htf = TFN.get(s.get("htf", ""), s.get("htf", ""))
-                ltf = TFN.get(s.get("ltf", ""), TFN.get(s["timeframe"], s["timeframe"]))
+                # Enhanced daily CRT card — confirmed setup + trade plan, % only.
                 tp1, tp2, sl = tr["tp1"], tr["tp2"], tr["stop"]
                 r1, r2, rsk = abs(pct(tp1)), abs(pct(tp2)), abs(pct(sl))
                 side = "🟢 BUY (long)" if s["direction"] == "LONG" else "🔴 SELL (short)"
-                dir_word = "uptrend" if s["direction"] == "LONG" else "downtrend"
-                trap = ("swept an old low then reversed up" if s["direction"] == "LONG"
-                        else "swept an old high then reversed down")
+                trap = ("swept an old low then closed back inside — a liquidity grab"
+                        if s["direction"] == "LONG"
+                        else "swept an old high then closed back inside — a liquidity grab")
+                conf = s.get("crt_conf", 1)
                 b = [
-                    f"⭐ A+ CRT SETUP — {s['coin']}",
-                    f"{htf} setup · entry timed on the {ltf} chart",
+                    f"📊 CRT (Daily) — {s['coin']}",
+                    f"Daily · with-trend · {conf} key level"
+                    + ("s" if conf != 1 else "") + " · SMT confirmed",
                     "",
                     f"{side}",
-                    f"💵 Entry (limit)  {fmt_price(entry)}   ← wait for the pullback (retest)",
-                    f"🛑 Stop loss      {fmt_price(sl)}   (-{rsk:.1f}%)",
-                    f"🎯 Target 1       {fmt_price(tp1)}   (+{r1:.1f}%)   ← bank 50%, move stop to break-even",
-                    f"🏁 Target 2       {fmt_price(tp2)}   (+{r2:.1f}%)   ← runner to the C1 body",
+                    f"💵 Entry  {fmt_price(entry)}   ← C3 confirmation close",
+                    f"🛑 Stop loss  {fmt_price(sl)}   (-{rsk:.1f}%)   ← beyond C2's swept extreme",
+                    f"🎯 Target 1  {fmt_price(tp1)}   (+{r1:.1f}%)   ← 50% of the range · bank 50%, stop to break-even",
+                    f"🏁 Target 2  {fmt_price(tp2)}   (+{r2:.1f}%)   ← opposite extreme of the range (runner)",
                     "",
-                    "📋 The logic (why it qualified):",
-                    f"   • With the {htf} {dir_word} — only trading with the trend",
-                    f"   • At a key level: {s.get('key_level', 'key levels')}",
-                    f"   • Price {trap} — a liquidity grab (the trap)",
-                    f"   • Entry on the {ltf} retest into the discount zone (OTE)",
+                    "📋 The logic:",
+                    f"   • Price {trap}",
+                    "   • Next candle confirmed the reversal (C3 close)",
+                    f"   • At a key level: {s.get('key_level', 'key level')}, with the trend",
+                    "   • SMT: the reference (BTC/ETH) did not sweep — divergence in our favour",
                     "",
-                    "📝 Best-setup scanner (paper) — your call; risk ~1%, check the chart first.",
+                    "📝 Paper forward-test (validated daily model) — no real money.",
                 ]
                 blocks.append("\n".join(b))
                 continue
