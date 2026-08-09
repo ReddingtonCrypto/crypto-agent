@@ -202,22 +202,29 @@ def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
     if risk <= 0:
         return None
 
-    # Target = the nearest opposing swing level (draw-on-liquidity) giving >= min_rr.
+    # Range = the swept level (C1 origin) -> the opposing pool (draw-on-liquidity).
+    # TP1 = 50% of that range (the first-target rule, measured from C1's START,
+    # i.e. the swept level — NOT halfway from entry). TP2 = the pool. The setup
+    # must be UNTOUCHED with ROOM: the close must still sit beyond the 50% so the
+    # first target is genuinely ahead, and the R:R to that 50% must be >= min_rr.
     if direction == "SHORT":
         pools = sorted([p for (idx, p) in lows
                         if i - level_lookback <= idx <= i - 1 and p < entry], reverse=True)
     else:
         pools = sorted([p for (idx, p) in highs
                         if i - level_lookback <= idx <= i - 1 and p > entry])
-    tp2 = None
+    tp1 = tp2 = None
     for pool in pools:
-        if abs(pool - entry) / risk >= min_rr:
-            tp2 = float(pool)
+        mid = (level + pool) / 2.0                 # 50% of the C1 range
+        has_room = (entry > mid) if direction == "SHORT" else (entry < mid)
+        if not has_room:
+            continue                               # 50% already inside the move -> no room
+        if abs(entry - mid) / risk >= min_rr:      # good R:R to the FIRST target
+            tp1, tp2 = float(mid), float(pool)
             break
-    if tp2 is None:
+    if tp1 is None:
         return None
-    rr = round(abs(tp2 - entry) / risk, 2)
-    tp1 = entry + (tp2 - entry) * 0.5
+    rr = round(abs(tp1 - entry) / risk, 2)         # R:R to the 50% (first target)
 
     labels = [f"swept old {'high' if direction == 'SHORT' else 'low'} @ {level:.6g}"]
     conf = 1

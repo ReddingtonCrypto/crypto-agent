@@ -119,6 +119,9 @@ def _handle(action, pid):
         elif tr and tr.get("mode") == "limit":
             send_message(f"⏳ <b>{tag}</b> — LIMIT set @ <code>{tr['fill_price']:.6g}</code>. "
                          f"Waiting for price to reach it before it starts tracking.")
+        elif tr and tr.get("mode") == "expired":
+            send_message(f"⚠️ <b>{tag}</b> — no trade: {tr['reason']} before you approved. "
+                         f"Skipped (no room left).")
         else:
             send_message(f"⚠️ Couldn't open <b>{tag}</b> — already open/waiting or no longer pending.")
     else:

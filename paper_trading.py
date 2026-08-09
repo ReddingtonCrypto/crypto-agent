@@ -184,13 +184,14 @@ def approve_pending(pending_id, current_price=None):
     success, or None if it wasn't pending / a live duplicate exists. Idempotent."""
     conn = _conn()
     row = conn.execute(
-        "SELECT coin, direction, timeframe, strategy, status, entry FROM paper_trades WHERE id=?",
+        "SELECT coin, direction, timeframe, strategy, status, entry, stop, tp1 "
+        "FROM paper_trades WHERE id=?",
         (pending_id,),
     ).fetchone()
     if not row or row[4] != "PENDING":
         conn.close()
         return None
-    coin, direction, timeframe, strategy, _, entry = row
+    coin, direction, timeframe, strategy, _, entry, stop, tp1 = row
     dupe = conn.execute(
         "SELECT 1 FROM paper_trades WHERE coin=? AND direction=? AND timeframe=? "
         "AND strategy=? AND status IN ('OPEN','WAITING') LIMIT 1",
@@ -201,6 +202,23 @@ def approve_pending(pending_id, current_price=None):
         conn.commit()
         conn.close()
         return None
+
+    # UNTOUCHED guard — the fix for "opens then instantly says TP hit". If price
+    # has already reached the 50% (the move already delivered) or blown the stop
+    # (invalidated) since the setup formed, there is no room left: do NOT open.
+    if current_price is not None and tp1 is not None and stop is not None:
+        if direction == "SHORT":
+            delivered, invalid = current_price <= tp1, current_price >= stop
+        else:
+            delivered, invalid = current_price >= tp1, current_price <= stop
+        if delivered or invalid:
+            conn.execute("UPDATE paper_trades SET status='CANCELLED', closed_at=? WHERE id=?",
+                         (_now(), pending_id))
+            conn.commit()
+            conn.close()
+            return {"coin": coin, "direction": direction, "timeframe": timeframe,
+                    "mode": "expired",
+                    "reason": "already delivered to 50%" if delivered else "stop invalidated"}
 
     mode = "market"
     fill_price = entry
