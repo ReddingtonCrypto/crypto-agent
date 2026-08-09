@@ -79,6 +79,17 @@ for _a in sys.argv:
 USE_TREND = "--trend" in sys.argv
 USE_KEYLEVEL = "--keylevel" in sys.argv
 USE_CONFIRM = "--confirm" in sys.argv
+# --ote-entry : the TAUGHT candle-3 entry. Instead of chasing the C3 close, wait
+# for candle 3 (bar i+1) to RETRACE into the OTE discount/premium zone of the C2
+# range (0.705-0.786 fib) and enter there, with a TIGHT stop at C2's swept
+# extreme (the turtle-soup wick). This is the fix for the wide-stop bleed: it
+# shrinks risk to a fraction of the C2 range while keeping the same 50%/opposite
+# targets. Fills only if candle 3 actually trades into the zone.
+OTE_ENTRY = "--ote-entry" in sys.argv
+OTE_FIB = 0.75       # centre of the 0.705-0.786 discount/premium retracement
+for _a in sys.argv:
+    if _a.startswith("--ote-fib="):
+        OTE_FIB = float(_a.split("=", 1)[1])
 LONG_ONLY = "--long-only" in sys.argv
 SHORT_ONLY = "--short-only" in sys.argv
 # --smt : Smart Money Technique (cross-asset divergence). Compare the coin's CRT
@@ -463,8 +474,32 @@ def backtest_coin(coin):
                 continue
 
             enter_i = i
+            # --- Taught candle-3 OTE entry: retrace into the discount/premium
+            #     zone of the C2 range, tight stop at the swept extreme ---
+            if OTE_ENTRY:
+                j = i + 1
+                if j >= len(df):
+                    continue
+                rng = c2_hi - c2_lo
+                if rng <= 0:
+                    continue
+                if direction == "LONG":
+                    entry = c2_hi - OTE_FIB * rng     # discount zone entry
+                    stop = c2_lo                       # tight: the swept low
+                    if not (lo[j] <= entry):           # candle 3 must reach it
+                        continue
+                    if entry <= stop:
+                        continue
+                else:
+                    entry = c2_lo + OTE_FIB * rng     # premium zone entry
+                    stop = c2_hi                       # tight: the swept high
+                    if not (h[j] >= entry):
+                        continue
+                    if entry >= stop:
+                        continue
+                enter_i = i   # sim from candle 3 (i+1) onward; it is the fill bar
             # --- Layer: C3 confirmation (single-candle distribution close) ---
-            if USE_CONFIRM:
+            elif USE_CONFIRM:
                 j = i + 1
                 if j >= len(df):
                     continue
@@ -662,6 +697,7 @@ def main():
     if USE_TREND: layers.append("trend")
     if USE_KEYLEVEL: layers.append(f"keylevel[{'+'.join(sorted(KL_TYPES))}]")
     if USE_CONFIRM: layers.append("C3-confirm")
+    if OTE_ENTRY: layers.append(f"ote-entry[{OTE_FIB}]")
     if LONG_ONLY: layers.append("long-only")
     if SHORT_ONLY: layers.append("short-only")
     layers.append(f"target={TARGET_MODE}")
