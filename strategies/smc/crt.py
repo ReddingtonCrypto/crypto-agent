@@ -146,8 +146,9 @@ def detect_crt_setup(df, kl_lookback=KL_LOOKBACK, min_confluence=1, min_rr=1.0):
             "regime": "range" if trend is None else "with-trend"}
 
 
-def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=10,
-                     level_lookback=120, min_age=12, kl_lookback=KL_LOOKBACK):
+def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
+                     level_lookback=40, min_age=5, spike_mult=2.5,
+                     kl_lookback=KL_LOOKBACK):
     """SCOUT detector — a REAL liquidity-sweep CRT you can validate on the chart.
 
     The last CLOSED candle must sweep a GENUINE prior SWING high/low (a level
@@ -170,18 +171,50 @@ def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=10,
     if len(df) < max(level_lookback + swing_lb + 3, 55):
         return None
     h = df["high"].to_numpy(); l = df["low"].to_numpy()
+    o = df["open"].to_numpy()
     c = df["close"].to_numpy()
     i = len(df) - 1
     s_hi, s_lo, s_close = float(h[i]), float(l[i]), float(c[i])
 
     highs, lows = find_swings(df, lookback=swing_lb)
 
-    # A real prior swing HIGH the last candle wicked above but closed back below.
+    # Typical candle range in the window — used to reject OUTLIER SPIKE wicks
+    # (flash-crash / data-glitch candles) that no human would mark as a level.
+    a = max(0, i - level_lookback)
+    rng = sorted(float(h[k] - l[k]) for k in range(a, i))
+    med_range = rng[len(rng) // 2] if rng else 0.0
+
+    def _real_level(idx, is_low):
+        """A swing level is REAL only if the candle that made it isn't an outlier
+        spike — the wick BEYOND the body must be within spike_mult x the typical
+        range (a flash-crash wick to a price price never actually traded around
+        is not a level)."""
+        if med_range <= 0:
+            return True
+        if is_low:
+            wick = min(o[idx], c[idx]) - l[idx]      # lower wick below the body
+        else:
+            wick = h[idx] - max(o[idx], c[idx])      # upper wick above the body
+        return wick <= spike_mult * med_range
+
+    def _untapped_high(idx, p):
+        """The level held as resting liquidity until now — no candle BETWEEN its
+        formation and the sweep candle already traded through it."""
+        seg = h[idx + 1:i]
+        return len(seg) == 0 or seg.max() <= p
+
+    def _untapped_low(idx, p):
+        seg = l[idx + 1:i]
+        return len(seg) == 0 or seg.min() >= p
+
+    # A real, UNTAPPED prior swing HIGH the last candle wicked above but closed
+    # back below (the first breach of that resting liquidity).
     swept_highs = [p for (idx, p) in highs
-                   if i - level_lookback <= idx <= i - min_age and s_hi > p > s_close]
-    # A real prior swing LOW wicked below but closed back above.
+                   if i - level_lookback <= idx <= i - min_age and s_hi > p > s_close
+                   and _real_level(idx, False) and _untapped_high(idx, p)]
     swept_lows = [p for (idx, p) in lows
-                  if i - level_lookback <= idx <= i - min_age and s_lo < p < s_close]
+                  if i - level_lookback <= idx <= i - min_age and s_lo < p < s_close
+                  and _real_level(idx, True) and _untapped_low(idx, p)]
     short_lvl = max(swept_highs) if swept_highs else None    # nearest swept high
     long_lvl = min(swept_lows) if swept_lows else None        # nearest swept low
 
