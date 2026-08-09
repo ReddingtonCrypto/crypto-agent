@@ -146,59 +146,94 @@ def detect_crt_setup(df, kl_lookback=KL_LOOKBACK, min_confluence=1, min_rr=1.0):
             "regime": "range" if trend is None else "with-trend"}
 
 
-def detect_crt_scout(df, min_confluence=1, min_rr=1.0, kl_lookback=KL_LOOKBACK):
-    """SCOUT detector for the human-approval flow — the user's own method:
-    a CRT on the last CLOSED candle (C2 sweeps C1's high/low AND closes back
-    inside), sitting at key-level confluence (FVG / old high-low / rejection
-    block), direction = the REVERSAL itself (NO trend filter — swept a low +
-    closed back in = LONG; swept a high = SHORT). Marks the setup for the human
-    to approve; it does NOT auto-open.
+def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
+                     level_lookback=60, min_age=6, kl_lookback=KL_LOOKBACK):
+    """SCOUT detector — a REAL liquidity-sweep CRT you can validate on the chart.
 
-    Entry = C2 close. Stop = C2's swept extreme. TP1 = 50% of the C1 range,
-    TP2 = the opposite C1 extreme (the draw-on-liquidity). Only setups whose
-    reward:risk to TP2 is at least `min_rr` are returned. Returns
-    {direction, entry, stop, tp1, tp2, rr, key_level, confluence, signal_ts}
-    or None.
+    The last CLOSED candle must sweep a GENUINE prior SWING high/low (a level
+    that stood for >= `min_age` bars — real liquidity a human would mark) and
+    CLOSE back through it (the turtle-soup rejection):
+      * SHORT: the candle's WICK poked above an old swing HIGH but its CLOSE is
+        back BELOW that high.
+      * LONG:  the wick poked below an old swing LOW but the CLOSE is back ABOVE.
+    So the swept level IS the key level (no phantom distant pivots), and a mere
+    poke above the *previous candle* no longer qualifies. Direction = the
+    reversal (NO trend filter).
+
+    Entry = the candle's close. Stop = the sweep wick (the swept extreme). Target
+    (TP2) = the nearest prior opposing swing level (the draw-on-liquidity) that
+    yields >= `min_rr`; TP1 = halfway there. Confluence = the swept swing (always
+    1) + any FVG / rejection block also at the sweep. Returns
+    {direction, entry, stop, tp1, tp2, rr, key_level, confluence, level,
+     signal_ts} or None.
     """
-    if len(df) < max(kl_lookback + 3, 45):
+    if len(df) < max(level_lookback + swing_lb + 3, 55):
         return None
-    c1 = df.iloc[-2]
-    c2 = df.iloc[-1]
-    c1_hi, c1_lo = float(c1.high), float(c1.low)
-    entry = float(c2.close)
-    if c2.high > c1_hi and c1_lo <= entry <= c1_hi:
-        direction, stop = "SHORT", float(c2.high)
-    elif c2.low < c1_lo and c1_lo <= entry <= c1_hi:
-        direction, stop = "LONG", float(c2.low)
-    else:
-        return None
-
+    h = df["high"].to_numpy(); l = df["low"].to_numpy()
+    c = df["close"].to_numpy()
     i = len(df) - 1
-    highs, lows = find_swings(df, lookback=2)
-    cnt, labels = key_levels.count_key_levels(df, i, direction, swings=(highs, lows))
-    if cnt < min_confluence:
-        return None
+    s_hi, s_lo, s_close = float(h[i]), float(l[i]), float(c[i])
 
-    mid = (c1_hi + c1_lo) / 2.0
-    opp = c1_hi if direction == "LONG" else c1_lo
-    if direction == "LONG":
-        if not (stop < entry < opp):
-            return None
-        tp1 = mid if mid > entry else (entry + opp) / 2.0
+    highs, lows = find_swings(df, lookback=swing_lb)
+
+    # A real prior swing HIGH the last candle wicked above but closed back below.
+    swept_highs = [p for (idx, p) in highs
+                   if i - level_lookback <= idx <= i - min_age and s_hi > p > s_close]
+    # A real prior swing LOW wicked below but closed back above.
+    swept_lows = [p for (idx, p) in lows
+                  if i - level_lookback <= idx <= i - min_age and s_lo < p < s_close]
+    short_lvl = max(swept_highs) if swept_highs else None    # nearest swept high
+    long_lvl = min(swept_lows) if swept_lows else None        # nearest swept low
+
+    if short_lvl is not None and long_lvl is not None:
+        # rare outside-bar sweeping both — take the tighter (stronger) rejection
+        direction = "SHORT" if (short_lvl - s_close) <= (s_close - long_lvl) else "LONG"
+    elif short_lvl is not None:
+        direction = "SHORT"
+    elif long_lvl is not None:
+        direction = "LONG"
     else:
-        if not (opp < entry < stop):
-            return None
-        tp1 = mid if mid < entry else (entry + opp) / 2.0
+        return None
+    level = short_lvl if direction == "SHORT" else long_lvl
 
+    entry = s_close
+    stop = s_hi if direction == "SHORT" else s_lo
     risk = abs(entry - stop)
-    rr = abs(opp - entry) / risk if risk else 0.0
-    if rr < min_rr:                       # skip poor reward:risk setups
+    if risk <= 0:
         return None
 
-    return {"direction": direction, "entry": entry, "stop": stop,
-            "tp1": float(tp1), "tp2": float(opp), "rr": round(rr, 2),
-            "key_level": " + ".join(labels) or "key level", "confluence": cnt,
-            "signal_ts": int(c2.timestamp)}
+    # Target = the nearest opposing swing level (draw-on-liquidity) giving >= min_rr.
+    if direction == "SHORT":
+        pools = sorted([p for (idx, p) in lows
+                        if i - level_lookback <= idx <= i - 1 and p < entry], reverse=True)
+    else:
+        pools = sorted([p for (idx, p) in highs
+                        if i - level_lookback <= idx <= i - 1 and p > entry])
+    tp2 = None
+    for pool in pools:
+        if abs(pool - entry) / risk >= min_rr:
+            tp2 = float(pool)
+            break
+    if tp2 is None:
+        return None
+    rr = round(abs(tp2 - entry) / risk, 2)
+    tp1 = entry + (tp2 - entry) * 0.5
+
+    labels = [f"swept old {'high' if direction == 'SHORT' else 'low'} @ {level:.6g}"]
+    conf = 1
+    if key_levels.at_fvg(df, i, direction):
+        conf += 1
+        labels.append("FVG")
+    if key_levels.at_rejection_block(df, i, direction, swings=(highs, lows)):
+        conf += 1
+        labels.append("rejection block")
+    if conf < min_confluence:
+        return None
+
+    return {"direction": direction, "entry": float(entry), "stop": float(stop),
+            "tp1": float(tp1), "tp2": tp2, "rr": rr,
+            "key_level": " + ".join(labels), "confluence": conf,
+            "level": float(level), "signal_ts": int(df["timestamp"].iloc[i])}
 
 
 def _smt_confirms(df, ref_df, i, direction):
