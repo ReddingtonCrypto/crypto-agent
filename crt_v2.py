@@ -118,6 +118,10 @@ for _a in sys.argv:
         CONFLUENCE_MIN = int(_a.split("=", 1)[1])
     elif _a.startswith("--target-r="):
         TARGET_R = float(_a.split("=", 1)[1])
+    elif _a.startswith("--cisd="):
+        # instant-CISD quality filter: LTF bars after the sweep to allow the CISD
+        # close. Lower = the group's "instant CISD = high probability" rule.
+        CISD_WINDOW = int(_a.split("=", 1)[1])
 
 
 def get_history(coin, timeframe, limit):

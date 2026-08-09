@@ -57,6 +57,9 @@ CACHE_DIR = "data/bt_cache"
 REFRESH = "--refresh" in sys.argv
 
 FEE = 0.001          # 0.1% per side -> 0.2% round-trip, same as backtest.py
+for _a in sys.argv:                      # --fee=0.0015 -> test higher slippage/costs
+    if _a.startswith("--fee="):
+        FEE = float(_a.split("=", 1)[1])
 MAX_HOLD = 200       # bars to give a trade before the time-stop closes it
 KL_LOOKBACK = 20     # bars back a sweep must exceed to count as an "old high/low"
 FVG_LOOKBACK = 15    # bars back to search for a Fair Value Gap key level
@@ -78,6 +81,18 @@ USE_KEYLEVEL = "--keylevel" in sys.argv
 USE_CONFIRM = "--confirm" in sys.argv
 LONG_ONLY = "--long-only" in sys.argv
 SHORT_ONLY = "--short-only" in sys.argv
+# --smt : Smart Money Technique (cross-asset divergence). Compare the coin's CRT
+# sweep to a REFERENCE asset (BTC for alts, ETH for BTC): only take the CRT when
+# the reference did NOT sweep the same way (divergence = SMT confirmation). The
+# taught idea: if both sweep, the break is "real"; if only one sweeps, it's a
+# fakeout that reverses.
+SMT = "--smt" in sys.argv
+# --inside-bar : the InsideBar CRT variant (flagged "high-probability" by the
+# sources). Instead of C2 = the candle right after C1, require >=1 INSIDE bar(s)
+# contained within C1's range (a consolidation), THEN a candle sweeps C1's
+# extreme + closes back in. C1 = the "mother" candle of the consolidation.
+INSIDE_BAR = "--inside-bar" in sys.argv
+INSIDE_MAX = 5        # how many bars back to look for the inside-bar mother
 # --- OTE-recipe levers (to test whether the recipe that rescued OTE also
 #  rescues CRT): --partial banks 50% at TP1_R and moves the runner to break-even
 #  (the group's risk mgmt); --target-r=N replaces the near C1-body target with a
@@ -86,11 +101,19 @@ SHORT_ONLY = "--short-only" in sys.argv
 USE_PARTIAL = "--partial" in sys.argv
 TP1_R = 2.0
 TARGET_R = None
+# --target-mode : the CRT TARGET FRAMEWORK to test (from the new-source research).
+#   c1body = our current target = C1's body (baseline)
+#   mid    = single target = 50% of the CRT range (C1 high/low midpoint)
+#   midopp = the taught framework: bank 50% at the 50% midpoint (+ move to BE),
+#            then run the rest to the OPPOSITE extreme of the CRT range
+TARGET_MODE = "c1body"
 for _a in sys.argv:
     if _a.startswith("--tp1r="):
         TP1_R = float(_a.split("=", 1)[1])
     if _a.startswith("--target-r="):
         TARGET_R = float(_a.split("=", 1)[1])
+    if _a.startswith("--target-mode="):
+        TARGET_MODE = _a.split("=", 1)[1]
 # --align : the taught timeframe-alignment model. Form the CRT (+ trend +
 # key level) on the HIGHER timeframe, then drop to the aligned LOWER timeframe
 # for the entry (a liquidity sweep + single-candle CISD), with a TIGHT stop at
@@ -226,6 +249,69 @@ def _simulate_partial(highs, lows, closes, i, direction, entry, stop, target):
     return "WIN", banked + 0.5 * pct(closes[end - 1]) - FEE * 200, risk_pct
 
 
+_REF_CACHE = {}
+
+
+def _get_ref(ref_coin, tf):
+    """Reference-asset (timestamp->idx map, low[], high[]) for the SMT check,
+    memoized. Built on the FULL reference history so lookups work regardless of
+    the coin's split window."""
+    key = (ref_coin, tf)
+    if key not in _REF_CACHE:
+        bars = get_history(ref_coin, tf)
+        rlo = [b[3] for b in bars]          # OHLCV: [ts,open,high,low,close,vol]
+        rhi = [b[2] for b in bars]
+        rts = {int(b[0]): idx for idx, b in enumerate(bars)}
+        _REF_CACHE[key] = (rts, rlo, rhi)
+    return _REF_CACHE[key]
+
+
+def _smt_confirms(coin, tf, ts_i, direction):
+    """True if the reference asset does NOT sweep the same way at this bar
+    (a Smart-Money-Technique divergence in the CRT's favour)."""
+    ref_coin = "ETH/USDT" if coin == "BTC/USDT" else "BTC/USDT"
+    rts, rlo, rhi = _get_ref(ref_coin, tf)
+    j = rts.get(int(ts_i))
+    if j is None or j < 1:
+        return False                        # no aligned ref bar -> can't confirm
+    if direction == "LONG":
+        return not (rlo[j] < rlo[j - 1])    # coin swept its low; ref did NOT = SMT
+    return not (rhi[j] > rhi[j - 1])         # coin swept its high; ref did NOT = SMT
+
+
+def _simulate_partial_explicit(highs, lows, closes, i, direction, entry, stop, tp1, tp2):
+    """Bank 50% at tp1 (move the runner's stop to break-even), run the rest to
+    tp2. Explicit PRICE targets (used by the 50%+opposite-extreme framework).
+    Same fee model and MAX_HOLD as the other sims."""
+    risk = abs(entry - stop)
+    risk_pct = risk / entry * 100.0
+    end = min(len(highs), i + 1 + MAX_HOLD)
+
+    def pct(px):
+        return ((px - entry) if direction == "LONG" else (entry - px)) / entry * 100.0
+
+    banked = None
+    for k in range(i + 1, end):
+        hi, loo = highs[k], lows[k]
+        if banked is None:
+            hit_stop = (loo <= stop) if direction == "LONG" else (hi >= stop)
+            hit_tp1 = (hi >= tp1) if direction == "LONG" else (loo <= tp1)
+            if hit_stop:
+                return "LOSS", pct(stop) - FEE * 200, risk_pct
+            if hit_tp1:
+                banked = 0.5 * pct(tp1)
+        else:
+            hit_be = (loo <= entry) if direction == "LONG" else (hi >= entry)
+            hit_tgt = (hi >= tp2) if direction == "LONG" else (loo <= tp2)
+            if hit_be and not hit_tgt:
+                return "WIN", banked - FEE * 200, risk_pct
+            if hit_tgt:
+                return "WIN", banked + 0.5 * pct(tp2) - FEE * 200, risk_pct
+    if banked is None:
+        return "EXPIRED", pct(closes[end - 1]) - FEE * 200, risk_pct
+    return "WIN", banked + 0.5 * pct(closes[end - 1]) - FEE * 200, risk_pct
+
+
 def _run_sim(highs, lows, closes, i, direction, entry, stop, target):
     """Route a trade through the chosen simulator, optionally overriding the
     near C1-body target with a FAR N-risk target (--target-r) and/or using the
@@ -311,6 +397,7 @@ def backtest_coin(coin):
         agent.add_indicators(df)
         o = df["open"].to_numpy(); h = df["high"].to_numpy()
         lo = df["low"].to_numpy(); c = df["close"].to_numpy()
+        ts = df["timestamp"].to_numpy()
 
         # Buy-and-hold benchmark over this exact window (the crypto reality check).
         if len(c) > 1 and c[0] > 0:
@@ -319,7 +406,20 @@ def backtest_coin(coin):
 
         start = max(KL_LOOKBACK + 1, 55)   # need history for MAs + key-level lookback
         for i in range(start, len(df) - 1):
-            c1_hi, c1_lo, c1_o, c1_c = h[i - 1], lo[i - 1], o[i - 1], c[i - 1]
+            if INSIDE_BAR:
+                # find the earliest "mother" candle whose range contains every
+                # candle between it and i-1 (>=1 inside bar) — a consolidation.
+                mother = None
+                for m in range(i - 2, max(i - 2 - INSIDE_MAX, start) - 1, -1):
+                    if all(h[k] <= h[m] and lo[k] >= lo[m] for k in range(m + 1, i)):
+                        mother = m
+                    else:
+                        break
+                if mother is None:
+                    continue
+                c1_hi, c1_lo, c1_o, c1_c = h[mother], lo[mother], o[mother], c[mother]
+            else:
+                c1_hi, c1_lo, c1_o, c1_c = h[i - 1], lo[i - 1], o[i - 1], c[i - 1]
             c2_hi, c2_lo, c2_close = h[i], lo[i], c[i]
 
             swept_high = c2_hi > c1_hi
@@ -358,6 +458,10 @@ def backtest_coin(coin):
             if USE_KEYLEVEL and not _at_keylevel(o, h, lo, c, i, direction):
                 continue
 
+            # --- Layer: SMT (cross-asset divergence confirmation) ---
+            if SMT and not _smt_confirms(coin, tf, ts[i], direction):
+                continue
+
             enter_i = i
             # --- Layer: C3 confirmation (single-candle distribution close) ---
             if USE_CONFIRM:
@@ -377,7 +481,25 @@ def backtest_coin(coin):
                     continue
                 enter_i = j
 
-            result, pnl, risk = _run_sim(h, lo, c, enter_i, direction, entry, stop, target)
+            # --- CRT target framework (baseline C1-body, or 50%/opposite-extreme) ---
+            if TARGET_MODE == "c1body":
+                result, pnl, risk = _run_sim(h, lo, c, enter_i, direction, entry, stop, target)
+            else:
+                mid = (c1_hi + c1_lo) / 2.0                 # 50% of the CRT range
+                opp = c1_hi if direction == "LONG" else c1_lo   # opposite extreme
+                mid_beyond = (mid > entry) if direction == "LONG" else (mid < entry)
+                if TARGET_MODE == "mid":
+                    if not mid_beyond:
+                        continue                            # 50% already reached at entry
+                    result, pnl, risk = _simulate(h, lo, c, enter_i, direction, entry, stop, mid)
+                elif TARGET_MODE == "midopp":
+                    if mid_beyond:
+                        result, pnl, risk = _simulate_partial_explicit(
+                            h, lo, c, enter_i, direction, entry, stop, mid, opp)
+                    else:                                   # past 50% -> just run to the opposite extreme
+                        result, pnl, risk = _simulate(h, lo, c, enter_i, direction, entry, stop, opp)
+                else:
+                    result, pnl, risk = _run_sim(h, lo, c, enter_i, direction, entry, stop, target)
             st["n"] += 1
             st["pnl"] += pnl
             st["r_sum"] += pnl / risk if risk else 0.0
@@ -469,6 +591,9 @@ def backtest_coin_aligned(coin):
                     continue
             if USE_KEYLEVEL and not _at_keylevel(ho, hh, hl, hc, i, direction):
                 continue
+            # --- SMT (cross-asset divergence) on the HTF setup ---
+            if SMT and not _smt_confirms(coin, htf, hts[i], direction):
+                continue
 
             t2 = int(hts[i]) + htf_ms                 # C2 close time
             if not lts or t2 < lts[0] or t2 > lts[-1]:
@@ -479,12 +604,28 @@ def backtest_coin_aligned(coin):
             if res is None:
                 continue
             enter_idx, entry, stop = res
-            if direction == "LONG" and target <= entry:
-                continue
-            if direction == "SHORT" and target >= entry:
-                continue
-
-            result, pnl, risk = _run_sim(lh, ll, lc, enter_idx, direction, entry, stop, target)
+            # --- target framework (HTF C1 body, or 50%/opposite-extreme) ---
+            if TARGET_MODE == "c1body":
+                if (direction == "LONG" and target <= entry) or \
+                   (direction == "SHORT" and target >= entry):
+                    continue
+                result, pnl, risk = _run_sim(lh, ll, lc, enter_idx, direction, entry, stop, target)
+            else:
+                mid = (c1_hi + c1_lo) / 2.0            # 50% of the HTF CRT range
+                opp = c1_hi if direction == "LONG" else c1_lo
+                mid_beyond = (mid > entry) if direction == "LONG" else (mid < entry)
+                if TARGET_MODE == "mid":
+                    if not mid_beyond:
+                        continue
+                    result, pnl, risk = _simulate(lh, ll, lc, enter_idx, direction, entry, stop, mid)
+                elif TARGET_MODE == "midopp":
+                    if mid_beyond:
+                        result, pnl, risk = _simulate_partial_explicit(
+                            lh, ll, lc, enter_idx, direction, entry, stop, mid, opp)
+                    else:
+                        result, pnl, risk = _simulate(lh, ll, lc, enter_idx, direction, entry, stop, opp)
+                else:
+                    result, pnl, risk = _run_sim(lh, ll, lc, enter_idx, direction, entry, stop, target)
             st["n"] += 1
             st["pnl"] += pnl
             st["r_sum"] += pnl / risk if risk else 0.0
@@ -502,12 +643,20 @@ def backtest_coin_aligned(coin):
 
 
 def main():
-    try:
-        coins = universe.get_universe(EXCHANGE, 100)[:TOP_N]
-    except Exception as e:
-        print(f"universe unavailable ({type(e).__name__}); using majors fallback")
-        coins = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
-                 "AVAX/USDT", "LINK/USDT", "LTC/USDT", "DOT/USDT", "DOGE/USDT"]
+    coins_file = None
+    for _a in sys.argv:
+        if _a.startswith("--coins-file="):
+            coins_file = _a.split("=", 1)[1]
+    if coins_file and os.path.exists(coins_file):
+        with open(coins_file) as f:                      # PINNED universe = clean, reproducible
+            coins = [ln.strip() for ln in f if ln.strip()][:TOP_N]
+    else:
+        try:
+            coins = universe.get_universe(EXCHANGE, 100)[:TOP_N]
+        except Exception as e:
+            print(f"universe unavailable ({type(e).__name__}); using majors fallback")
+            coins = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
+                     "AVAX/USDT", "LINK/USDT", "LTC/USDT", "DOT/USDT", "DOGE/USDT"]
 
     layers = []
     if USE_TREND: layers.append("trend")
@@ -515,6 +664,9 @@ def main():
     if USE_CONFIRM: layers.append("C3-confirm")
     if LONG_ONLY: layers.append("long-only")
     if SHORT_ONLY: layers.append("short-only")
+    layers.append(f"target={TARGET_MODE}")
+    if SMT: layers.append("SMT")
+    if INSIDE_BAR: layers.append("inside-bar")
     coin_fn = backtest_coin_aligned if ALIGN else backtest_coin
     mode = f"ALIGNED {[f'{h}->{l}' for h, l in ALIGN_PAIRS if h in TIMEFRAMES]}" if ALIGN else f"single-TF {TIMEFRAMES}"
     print(f"CRT backtest | coins={len(coins)} | mode={mode} | history={HISTORY}"
