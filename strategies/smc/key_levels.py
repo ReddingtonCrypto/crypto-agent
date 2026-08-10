@@ -173,17 +173,60 @@ def at_rejection_block(df, i, direction, lookback=30, swing_lb=2, tol=0.01, swin
 # --------------------------------------------------------------------------- #
 #  Combined helper — is bar i at ANY enabled key level? Returns the label.
 # --------------------------------------------------------------------------- #
-def at_key_level(df, i, direction, types=("oldhl", "fvg", "rejblock"), swings=None):
+# --------------------------------------------------------------------------- #
+#  Key level 4 — ORDER BLOCK (the last opposite-colour candle before displacement).
+# --------------------------------------------------------------------------- #
+def at_order_block(df, i, direction, lookback=20, disp_window=3, tol=0.003):
+    """A valid ICT Order Block the setup is reacting to.
+    Bullish OB (for LONG) = the last DOWN candle before a strong up move: a
+    bearish candle at j that price then DISPLACED up through (a later candle
+    within `disp_window` CLOSED above its high). The OB zone is [low[j], high[j]];
+    the setup qualifies when its swept extreme taps that zone. Bearish OB mirrors.
+    Returns {top, bottom} or None."""
+    h = df["high"].to_numpy(); l = df["low"].to_numpy()
+    o = df["open"].to_numpy(); c = df["close"].to_numpy()
+    swept = l[i] if direction == "LONG" else h[i]
+    start = max(1, i - lookback)
+    for j in range(i - 1, start - 1, -1):
+        top, bottom = float(h[j]), float(l[j])
+        if direction == "LONG":
+            if c[j] >= o[j]:                       # need a DOWN candle
+                continue
+            kd = next((k for k in range(j + 1, min(j + 1 + disp_window, i + 1))
+                       if c[k] > top), None)       # up-displacement CLOSED above it
+            if kd is None:
+                continue
+            # FRESH: price stayed above the OB from the displacement until now, so
+            # bar i is the FIRST retest (unmitigated order block).
+            if kd + 1 < i and l[kd + 1:i].min() <= top:
+                continue
+        else:
+            if c[j] <= o[j]:                       # need an UP candle
+                continue
+            kd = next((k for k in range(j + 1, min(j + 1 + disp_window, i + 1))
+                       if c[k] < bottom), None)
+            if kd is None:
+                continue
+            if kd + 1 < i and h[kd + 1:i].max() >= bottom:
+                continue
+        if bottom * (1 - tol) <= swept <= top * (1 + tol):
+            return {"top": top, "bottom": bottom}
+    return None
+
+
+def at_key_level(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob"), swings=None):
     if "oldhl" in types and at_old_high_low(df, i, direction, swings=swings):
         return "old high/low sweep"
     if "fvg" in types and at_fvg(df, i, direction):
         return "unfilled FVG"
     if "rejblock" in types and at_rejection_block(df, i, direction, swings=swings):
         return "rejection block"
+    if "ob" in types and at_order_block(df, i, direction):
+        return "order block"
     return None
 
 
-def count_key_levels(df, i, direction, types=("oldhl", "fvg", "rejblock"), swings=None):
+def count_key_levels(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob"), swings=None):
     """How many of the enabled key levels are present at once — the 'confluence'
     that separates an A+ setup (several stacking) from a marginal one (just one).
     Returns (count, labels)."""
@@ -194,4 +237,6 @@ def count_key_levels(df, i, direction, types=("oldhl", "fvg", "rejblock"), swing
         labels.append("FVG")
     if "rejblock" in types and at_rejection_block(df, i, direction, swings=swings):
         labels.append("rejection block")
+    if "ob" in types and at_order_block(df, i, direction):
+        labels.append("order block")
     return len(labels), labels
