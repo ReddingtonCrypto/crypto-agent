@@ -154,36 +154,6 @@ def _round_step(p):
     return 10.0 ** (math.floor(math.log10(p)) - 1) if p > 0 else 0.0
 
 
-def _sl_beyond_wick(stop, direction, buffer_pct=0.0015, clear_pct=0.0035):
-    """Push the stop slightly BEYOND the sweep wick, onto a deliberately ODD price.
-
-    Price very often runs a little past the sweep extreme before turning, and it
-    is drawn to round figures because that is where everyone's stops are resting.
-    A stop sitting exactly on the wick — or worse, just short of a round number —
-    is the easiest liquidity in the market. So:
-      1. step a small buffer past the wick (away from entry),
-      2. if an obvious round level sits just beyond that, jump clear of it,
-      3. settle on an odd, non-round tick (5 significant digits).
-    Every adjustment moves AWAY from entry, so the stop can only widen, never
-    tighten. SHORT stops sit above price, LONG stops below.
-    """
-    if stop <= 0:
-        return stop
-    up = direction == "SHORT"            # which way is "away from entry"
-    sign = 1.0 if up else -1.0
-    s = stop * (1.0 + sign * buffer_pct)
-
-    # 2) never park just short of a round number - price hunts straight through it
-    step = _round_step(s)
-    if step > 0:
-        nxt = (math.ceil(s / step) if up else math.floor(s / step)) * step
-        if abs(nxt - s) <= s * clear_pct:
-            s = nxt * (1.0 + sign * buffer_pct)
-
-    # 3) land on an odd, arbitrary-looking tick rather than a clean figure
-    return _odd_tick(s, up)
-
-
 def _odd_tick(x, up):
     """Nudge x to an odd, arbitrary-looking price (5 significant digits, last
     digit forced to 1/3/7/9) so it never sits on a figure the market is hunting.
@@ -195,39 +165,64 @@ def _odd_tick(x, up):
     return n * tick
 
 
-def _tp_inside_target(tp, direction, buffer_pct=0.0015, clear_pct=0.0035):
-    """Pull the target slightly INSIDE the level, onto a deliberately ODD price.
+def _nudge(price, up, buffer_pct=0.0015, clear_pct=0.0035):
+    """Step `price` a small buffer in the `up` direction, keep it clear of the
+    round figure it would otherwise sit on, and land it on an odd tick.
 
-    The mirror image of `_sl_beyond_wick`. Price routinely stalls and turns a
-    hair SHORT of an obvious level, so a target parked exactly on one — or just
-    past it — misses the fill by pennies and then watches the trade reverse.
-    Here every adjustment moves TOWARD entry, so the target only ever gets
-    easier to reach, never greedier:
-      1. pull a small buffer back from the level,
-      2. if a round figure sits just before it (the magnet price must travel
-         through first), settle on THIS side of that figure,
-      3. land on an odd, non-round tick.
+    Round numbers are where the crowd's orders rest, so price is drawn to them
+    and frequently turns right at one. Whichever price we are placing — stop,
+    target or limit entry — the fix is the same: never sit ON the figure, and
+    never sit just SHORT of the one price must travel through to reach us. Only
+    the chosen direction differs, which is what the three wrappers below decide.
     """
-    if tp <= 0:
-        return tp
-    up = direction == "SHORT"            # SHORT target sits below entry -> toward entry is up
+    if price <= 0:
+        return price
     sign = 1.0 if up else -1.0
-    t = tp * (1.0 + sign * buffer_pct)
+    p = price * (1.0 + sign * buffer_pct)
 
-    # 2) stay on the near side of the round figure price must reach first
-    step = _round_step(t)
+    step = _round_step(p)
     if step > 0:
-        near = (math.ceil(t / step) if up else math.floor(t / step)) * step
-        if abs(t - near) <= t * clear_pct:
-            t = near * (1.0 + sign * buffer_pct)
+        lvl = (math.ceil(p / step) if up else math.floor(p / step)) * step
+        if abs(lvl - p) <= p * clear_pct:
+            p = lvl * (1.0 + sign * buffer_pct)
 
-    return _odd_tick(t, up)
+    return _odd_tick(p, up)
+
+
+def _sl_beyond_wick(stop, direction, buffer_pct=0.0015, clear_pct=0.0035):
+    """Stop slightly BEYOND the sweep wick — AWAY from entry, so it only widens.
+
+    Price often runs a touch past the sweep extreme before turning, and a stop
+    sitting exactly on the wick is the easiest liquidity on the chart. SHORT
+    stops sit above entry (push up), LONG stops below (push down)."""
+    return _nudge(stop, direction == "SHORT", buffer_pct, clear_pct)
+
+
+def _tp_inside_target(tp, direction, buffer_pct=0.0015, clear_pct=0.0035):
+    """Target slightly INSIDE the level — TOWARD entry, so it only gets easier.
+
+    Price routinely stalls and turns a hair short of an obvious level, so a
+    target parked on one misses the fill by pennies and then reverses. A SHORT
+    target sits below entry, so "toward entry" is up; a LONG target, down."""
+    return _nudge(tp, direction == "SHORT", buffer_pct, clear_pct)
+
+
+def _entry_easier_fill(entry, direction, buffer_pct=0.0015, clear_pct=0.0035):
+    """Limit entry nudged so it ACTUALLY FILLS — the odd one out, and deliberately.
+
+    A limit entry is approached from the OPPOSITE side to a target: price falls
+    onto a LONG entry from above and rises onto a SHORT entry from below. So the
+    direction inverts — a LONG limit sits a touch HIGHER (price reaches it
+    sooner), a SHORT limit a touch LOWER. Costs a hair of entry price in exchange
+    for not watching the setup reverse a few ticks short of your order."""
+    return _nudge(entry, direction == "LONG", buffer_pct, clear_pct)
 
 
 def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
                      level_lookback=40, min_age=5, spike_mult=2.5,
                      min_stop_pct=0.015, sl_buffer_pct=0.0015,
-                     tp_buffer_pct=0.0015, kl_lookback=KL_LOOKBACK):
+                     tp_buffer_pct=0.0015, entry_buffer_pct=0.0015,
+                     kl_lookback=KL_LOOKBACK):
     """SCOUT detector — a REAL liquidity-sweep CRT you can validate on the chart.
 
     The last CLOSED candle must sweep a GENUINE prior SWING high/low (a level
@@ -240,7 +235,8 @@ def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
     poke above the *previous candle* no longer qualifies. Direction = the
     reversal (NO trend filter).
 
-    Entry = the candle's close. Stop = slightly BEYOND the sweep wick, nudged onto
+    Entry = the candle's close, nudged a hair to the near side so a resting limit
+    actually fills (see `_entry_easier_fill`). Stop = slightly BEYOND the sweep wick, nudged onto
     an odd/non-round price (see `_sl_beyond_wick`) so the common overshoot and the
     round-number stop hunt don't tag it. Targets sit just INSIDE their level on an
     odd price too (see `_tp_inside_target`), since price often turns a hair short
@@ -312,7 +308,10 @@ def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
         return None
     level = short_lvl if direction == "SHORT" else long_lvl
 
-    entry = s_close
+    # Entry is the sweep candle's close, nudged onto an odd price a hair on the
+    # NEAR side (see _entry_easier_fill) so a resting limit gets reached instead
+    # of missing the turn by a few ticks. Everything below measures from it.
+    entry = _entry_easier_fill(s_close, direction, buffer_pct=entry_buffer_pct)
     # Stop goes slightly BEYOND the sweep wick, on an odd (non-round) price —
     # price commonly runs a touch past the extreme, and round figures are hunted.
     stop = _sl_beyond_wick(s_hi if direction == "SHORT" else s_lo,
