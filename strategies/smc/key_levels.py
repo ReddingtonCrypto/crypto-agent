@@ -214,7 +214,36 @@ def at_order_block(df, i, direction, lookback=20, disp_window=3, tol=0.003):
     return None
 
 
-def at_key_level(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob"), swings=None):
+# --------------------------------------------------------------------------- #
+#  Key level 5 — EQUAL HIGHS / LOWS (engineered liquidity — the strongest pool).
+# --------------------------------------------------------------------------- #
+def at_equal_liquidity(df, i, direction, swing_lb=3, lookback=40, tol=0.005, swings=None):
+    """The sweep took out EQUAL highs/lows — 2+ prior swings clustered within
+    `tol` of each other that the current bar's wick just exceeded. This is ICT
+    'engineered liquidity' (equal highs = stacked short stops; equal lows =
+    stacked long stops) — the densest, highest-quality liquidity grab. Returns
+    {level, count} or None."""
+    h = df["high"].to_numpy(); l = df["low"].to_numpy()
+    highs, lows = _swings(df, i, swing_lb, swings)
+    if direction == "SHORT":
+        cands = sorted((p for (idx, p) in highs if i - lookback <= idx < i and p < h[i]),
+                       reverse=True)
+        if cands:
+            top = cands[0]
+            cluster = [p for p in cands if top > 0 and (top - p) / top <= tol]
+            if len(cluster) >= 2:
+                return {"level": float(top), "count": len(cluster)}
+    else:
+        cands = sorted(p for (idx, p) in lows if i - lookback <= idx < i and p > l[i])
+        if cands:
+            bot = cands[0]
+            cluster = [p for p in cands if bot > 0 and (p - bot) / bot <= tol]
+            if len(cluster) >= 2:
+                return {"level": float(bot), "count": len(cluster)}
+    return None
+
+
+def at_key_level(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob", "eqhl"), swings=None):
     if "oldhl" in types and at_old_high_low(df, i, direction, swings=swings):
         return "old high/low sweep"
     if "fvg" in types and at_fvg(df, i, direction):
@@ -223,10 +252,12 @@ def at_key_level(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob"), swi
         return "rejection block"
     if "ob" in types and at_order_block(df, i, direction):
         return "order block"
+    if "eqhl" in types and at_equal_liquidity(df, i, direction, swings=swings):
+        return "equal highs/lows"
     return None
 
 
-def count_key_levels(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob"), swings=None):
+def count_key_levels(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob", "eqhl"), swings=None):
     """How many of the enabled key levels are present at once — the 'confluence'
     that separates an A+ setup (several stacking) from a marginal one (just one).
     Returns (count, labels)."""
@@ -239,4 +270,6 @@ def count_key_levels(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob"),
         labels.append("rejection block")
     if "ob" in types and at_order_block(df, i, direction):
         labels.append("order block")
+    if "eqhl" in types and at_equal_liquidity(df, i, direction, swings=swings):
+        labels.append("equal highs/lows")
     return len(labels), labels
