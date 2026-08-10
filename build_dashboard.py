@@ -88,6 +88,9 @@ def _rows(conn):
     open_t = conn.execute(
         "SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY score DESC, opened_at DESC"
     ).fetchall()
+    pending_t = conn.execute(
+        "SELECT * FROM paper_trades WHERE status IN ('WAITING','PENDING') ORDER BY opened_at DESC"
+    ).fetchall()
     closed_t = conn.execute(
         "SELECT * FROM paper_trades WHERE status IN ('WIN','LOSS','EXPIRED') ORDER BY closed_at DESC LIMIT 50"
     ).fetchall()
@@ -97,7 +100,7 @@ def _rows(conn):
     avg = conn.execute(
         "SELECT AVG(pnl_pct) FROM paper_trades WHERE status IN ('WIN','LOSS')"
     ).fetchone()[0]
-    return open_t, closed_t, wins, losses, expired, avg
+    return open_t, pending_t, closed_t, wins, losses, expired, avg
 
 
 def _by_strategy(conn):
@@ -275,7 +278,7 @@ def build():
     os.makedirs(OUT_DIR, exist_ok=True)
 
     conn = sqlite3.connect(DB)
-    open_t, closed_t, wins, losses, expired, avg = _rows(conn)
+    open_t, pending_t, closed_t, wins, losses, expired, avg = _rows(conn)
     strat_rows = _by_strategy(conn)
     curve = _equity_curve(conn)
     long_curve = _equity_curve(conn, "LONG")
@@ -363,22 +366,46 @@ def build():
                 f"<tr><td>{r['coin']}{' 🎯' if r['tp1_hit'] else ''}</td>{dircell}"
                 f"<td>{r['strategy'] or '-'}</td>"
                 f"<td>{_type_of(r['timeframe'])}</td><td>{r['timeframe'] or '-'}</td>"
-                f"<td>{r['score']}%</td><td>{fmt_price(r['entry'])}</td>"
+                f"<td>{fmt_price(r['entry'])}</td>"
                 f"<td>{fmt_price(r['stop'])}</td>{tp_cells}"
                 f"<td>{r['opened_at']}</td></tr>"
             )
         dirhead = "<th>Dir</th>" if with_dir else ""
         return (
-            f"<table><tr><th>Coin</th>{dirhead}<th>Strategy</th><th>Type</th><th>TF</th><th>Conf</th><th>Entry</th>"
+            f"<table><tr><th>Coin</th>{dirhead}<th>Strategy</th><th>Type</th><th>TF</th><th>Entry</th>"
             "<th>Stop</th><th>TP1</th><th>TP2</th><th>Opened (UTC)</th></tr>"
             f"{''.join(row(r) for r in rows)}</table>"
         )
-    open_long = [r for r in open_t if r["direction"] == "LONG"]
-    open_short = [r for r in open_t if r["direction"] == "SHORT"]
-    ordered_open = sorted(open_t, key=lambda r: 0 if r["direction"] == "LONG" else 1)
+    # Newest trade at the top, oldest at the bottom (by opened time).
+    _newest_first = lambda rows: sorted(rows, key=lambda r: r["opened_at"] or "", reverse=True)
+    open_long = _newest_first([r for r in open_t if r["direction"] == "LONG"])
+    open_short = _newest_first([r for r in open_t if r["direction"] == "SHORT"])
+    ordered_open = _newest_first(open_t)
     open_all_table = _open_table(ordered_open, with_dir=True)
     open_long_table = _open_table(open_long)
     open_short_table = _open_table(open_short)
+
+    def _pending_table(rows):
+        if not rows:
+            return '<div class="empty">Nothing waiting or pending approval.</div>'
+        def row(r):
+            return (
+                f"<tr><td>{r['coin']}</td><td>{_dir_span(r['direction'])}</td>"
+                f"<td>{r['strategy'] or '-'}</td>"
+                f"<td>{_type_of(r['timeframe'])}</td><td>{r['timeframe'] or '-'}</td>"
+                f"<td>{r['status']}</td>"
+                f"<td>{fmt_price(r['entry'])}</td>"
+                f"<td>{fmt_price(r['stop'])}</td>"
+                f"<td>{fmt_price(r['tp1'])}</td><td>{fmt_price(r['tp2'])}</td>"
+                f"<td>{r['opened_at']}</td></tr>"
+            )
+        return (
+            "<table><tr><th>Coin</th><th>Dir</th><th>Strategy</th><th>Type</th><th>TF</th>"
+            "<th>Status</th><th>Entry</th><th>Stop</th><th>TP1</th><th>TP2</th>"
+            "<th>Created (UTC)</th></tr>"
+            f"{''.join(row(r) for r in rows)}</table>"
+        )
+    pending_table = _pending_table(pending_t)
 
     # Closed-trades table
     if closed_t:
@@ -480,6 +507,12 @@ def build():
         "<div class='panel'>"
         f"<h2>📊 All open trades ({len(open_t)})</h2>"
         f"{open_all_table}"
+        "</div>"
+
+        # Waiting (limit orders not yet filled) + pending approval
+        "<div class='panel'>"
+        f"<h2>⏳ Waiting / pending approval ({len(pending_t)})</h2>"
+        f"{pending_table}"
         "</div>"
         "<div class='row'>"
         "<div class='panel accent'>"

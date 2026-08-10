@@ -6,6 +6,8 @@ don't round to zero), but for display we trim to something readable.
 
 
 def fmt_price(p):
+    if p is None:
+        return "-"
     p = float(p)
     a = abs(p)
     if a >= 1000:

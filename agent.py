@@ -149,7 +149,7 @@ ENABLE_MSS = False              # standalone MSS off (backtest: ~break-even +0.0
 # (exits by signal — the flaw that blew up the old Trend strategy is gone).
 # Walk-forward + fees: beat buy-and-hold on return, Sharpe AND drawdown in every
 # window (full +4728%/0.82 Sharpe vs +2120%/0.67; lower DD throughout). Paper.
-ENABLE_TREND_GATED = True
+ENABLE_TREND_GATED = False      # DISABLED 2026-08-10 per user — auto trades cluttered the CRT view; keep CRT + ICT only
 TREND_SMA = 50
 TREND_TF = "1d"
 # ICT is LONG-ONLY (2026-08-09): its shorts were a disaster live (18% win,
