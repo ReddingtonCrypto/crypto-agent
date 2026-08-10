@@ -164,6 +164,17 @@ ICT_MAX_STOP_PCT = 8.0
 # NOTE: the trend-following "TrendMA" (dualcross 20/100 SMA) strategy was REMOVED
 # 2026-08-06 — the lab's risk-adjusted "edge" never showed up in live paper
 # trading (12 trades, one -32.9% blow-up on a too-wide stop); pulled entirely.
+def _load_pinned(path="pinned_universe.txt"):
+    """User's watchlist coins (COIN/USDT per line) always added to the universe."""
+    try:
+        with open(path) as f:
+            return [ln.strip() for ln in f if ln.strip() and "/" in ln]
+    except OSError:
+        return []
+
+
+PINNED_COINS = _load_pinned()   # ~139 coins from the user's 11 TradingView lists
+
 UNIVERSE_SIZE = 60              # top N by mcap (40->50->60 per user) — applies to
                                 # ALL strategies (ICT + CRT) via get_universe_ranked.
 
@@ -542,6 +553,9 @@ def run_agent():
     except Exception as e:
         print(f"ranked universe failed ({type(e).__name__}); mcap fallback.")
         coins = universe.get_universe(exchange, limit=100)[:UNIVERSE_SIZE]
+    # Pinned coins (the user's watchlists) always scanned, on top of the ranked
+    # top-N. Union, deduped, order preserved. Missing/illiquid ones fail soft.
+    coins = coins + [c for c in PINNED_COINS if c not in coins]
     bias = market_bias()
 
     # Narrative awareness: which sectors is money rotating into right now.
