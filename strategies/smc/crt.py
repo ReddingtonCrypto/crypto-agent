@@ -181,17 +181,53 @@ def _sl_beyond_wick(stop, direction, buffer_pct=0.0015, clear_pct=0.0035):
             s = nxt * (1.0 + sign * buffer_pct)
 
     # 3) land on an odd, arbitrary-looking tick rather than a clean figure
-    tick = 10.0 ** (math.floor(math.log10(s)) - 4)
-    n = int(math.ceil(s / tick) if up else math.floor(s / tick))
+    return _odd_tick(s, up)
+
+
+def _odd_tick(x, up):
+    """Nudge x to an odd, arbitrary-looking price (5 significant digits, last
+    digit forced to 1/3/7/9) so it never sits on a figure the market is hunting.
+    Moves in the `up` direction only, so the caller keeps its safety margin."""
+    tick = 10.0 ** (math.floor(math.log10(x)) - 4)
+    n = int(math.ceil(x / tick) if up else math.floor(x / tick))
     while n % 10 not in (1, 3, 7, 9):
         n += 1 if up else -1
     return n * tick
 
 
+def _tp_inside_target(tp, direction, buffer_pct=0.0015, clear_pct=0.0035):
+    """Pull the target slightly INSIDE the level, onto a deliberately ODD price.
+
+    The mirror image of `_sl_beyond_wick`. Price routinely stalls and turns a
+    hair SHORT of an obvious level, so a target parked exactly on one — or just
+    past it — misses the fill by pennies and then watches the trade reverse.
+    Here every adjustment moves TOWARD entry, so the target only ever gets
+    easier to reach, never greedier:
+      1. pull a small buffer back from the level,
+      2. if a round figure sits just before it (the magnet price must travel
+         through first), settle on THIS side of that figure,
+      3. land on an odd, non-round tick.
+    """
+    if tp <= 0:
+        return tp
+    up = direction == "SHORT"            # SHORT target sits below entry -> toward entry is up
+    sign = 1.0 if up else -1.0
+    t = tp * (1.0 + sign * buffer_pct)
+
+    # 2) stay on the near side of the round figure price must reach first
+    step = _round_step(t)
+    if step > 0:
+        near = (math.ceil(t / step) if up else math.floor(t / step)) * step
+        if abs(t - near) <= t * clear_pct:
+            t = near * (1.0 + sign * buffer_pct)
+
+    return _odd_tick(t, up)
+
+
 def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
                      level_lookback=40, min_age=5, spike_mult=2.5,
                      min_stop_pct=0.015, sl_buffer_pct=0.0015,
-                     kl_lookback=KL_LOOKBACK):
+                     tp_buffer_pct=0.0015, kl_lookback=KL_LOOKBACK):
     """SCOUT detector — a REAL liquidity-sweep CRT you can validate on the chart.
 
     The last CLOSED candle must sweep a GENUINE prior SWING high/low (a level
@@ -206,7 +242,9 @@ def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
 
     Entry = the candle's close. Stop = slightly BEYOND the sweep wick, nudged onto
     an odd/non-round price (see `_sl_beyond_wick`) so the common overshoot and the
-    round-number stop hunt don't tag it. Target
+    round-number stop hunt don't tag it. Targets sit just INSIDE their level on an
+    odd price too (see `_tp_inside_target`), since price often turns a hair short
+    of an obvious figure. Target
     (TP2) = the nearest prior opposing swing level (the draw-on-liquidity) that
     yields >= `min_rr`; TP1 = halfway there. Confluence = the swept swing (always
     1) + any FVG / rejection block also at the sweep. Returns
@@ -305,8 +343,15 @@ def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
         has_room = (entry > mid) if direction == "SHORT" else (entry < mid)
         if not has_room:
             continue                               # 50% already inside the move -> no room
-        if abs(entry - mid) / risk >= min_rr:      # good R:R to the FIRST target
-            tp1, tp2 = float(mid), float(pool)
+        # Targets sit just INSIDE the level on an odd price (see _tp_inside_target),
+        # so the R:R gate below is measured against the price we actually exit at.
+        c1 = _tp_inside_target(mid, direction, buffer_pct=tp_buffer_pct)
+        c2 = _tp_inside_target(pool, direction, buffer_pct=tp_buffer_pct)
+        still_ahead = (entry > c1 > 0) if direction == "SHORT" else (c1 > entry)
+        if not still_ahead:
+            continue                               # pulled back past entry -> no trade left
+        if abs(entry - c1) / risk >= min_rr:       # good R:R to the FIRST target
+            tp1, tp2 = float(c1), float(c2)
             break
     if tp1 is None:
         return None
