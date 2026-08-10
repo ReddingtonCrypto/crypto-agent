@@ -503,16 +503,17 @@ def build():
         f"{sector_table}"
         "</div>"
 
-        # 4) Open trades — all on top, then longs | shorts side by side
-        "<div class='panel'>"
-        f"<h2>📊 All open trades ({len(open_t)})</h2>"
-        f"{open_all_table}"
-        "</div>"
-
-        # Waiting (limit orders not yet filled) + pending approval
+        # 4) Waiting (limit orders not yet filled) + pending approval — these need
+        # your attention first, so they sit above the trades already running.
         "<div class='panel'>"
         f"<h2>⏳ Waiting / pending approval ({len(pending_t)})</h2>"
         f"{pending_table}"
+        "</div>"
+
+        # Then open trades — all on top, then longs | shorts side by side
+        "<div class='panel'>"
+        f"<h2>📊 All open trades ({len(open_t)})</h2>"
+        f"{open_all_table}"
         "</div>"
         "<div class='row'>"
         "<div class='panel accent'>"
