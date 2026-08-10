@@ -761,13 +761,17 @@ def run_agent():
     #     quiet intraday (dedup stops re-opening the same position).
     if ENABLE_TREND_GATED:
         try:
-            btc_df = trend_daily.get("BTC/USDT") or _closed_df("BTC/USDT", TREND_TF, {})
+            btc_df = trend_daily.get("BTC/USDT")
+            if btc_df is None:
+                btc_df = _closed_df("BTC/USDT", TREND_TF, {})
             btc_bull = _above_sma(btc_df, TREND_SMA)
             opened = closed = 0
             # EXITS first: close any open trend whose alt fell below SMA, or BTC
             # regime turned off.
             for t in paper_trading.get_open_trends():
-                adf = trend_daily.get(t["coin"]) or _closed_df(t["coin"], TREND_TF, {})
+                adf = trend_daily.get(t["coin"])
+                if adf is None:
+                    adf = _closed_df(t["coin"], TREND_TF, {})
                 if adf is None:
                     continue
                 alt_bull = _above_sma(adf, TREND_SMA)
