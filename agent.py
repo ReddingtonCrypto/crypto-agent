@@ -155,7 +155,7 @@ ICT_MAX_STOP_PCT = 8.0
 # NOTE: the trend-following "TrendMA" (dualcross 20/100 SMA) strategy was REMOVED
 # 2026-08-06 — the lab's risk-adjusted "edge" never showed up in live paper
 # trading (12 trades, one -32.9% blow-up on a too-wide stop); pulled entirely.
-UNIVERSE_SIZE = 50              # top N by mcap (widened 40->50 per user) — applies to
+UNIVERSE_SIZE = 60              # top N by mcap (40->50->60 per user) — applies to
                                 # ALL strategies (ICT + CRT) via get_universe_ranked.
 
 # Money-flow gate: only take a signal when the coin is in a real volume surge
