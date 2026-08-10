@@ -114,7 +114,9 @@ SCOUT_TF_WEIGHT = {"1w": 3, "1d": 2, "4h": 1}
 # config = (entry timeframe, HTF-bias filter or None): 1h and 12h run natively;
 # 4h is gated by 12h structure (alignment rescues 4h's weak half). Still PAPER —
 # an honest forward-test to see if the robust backtest edge holds live.
-ENABLE_OTE = True
+# OTE turned OFF (user decision 2026-08-09): the setup is real but ultra-rare
+# (~4 per coin per year) so it opened 0 live trades — not worth a strategy slot.
+ENABLE_OTE = False
 OTE_CONFIGS = [("1h", None), ("12h", None), ("4h", "12h")]
 
 # OTE SETUP-SCANNER (strategy="OTE-Scan") — the WIDE discretionary feed. OTE's
@@ -124,7 +126,7 @@ OTE_CONFIGS = [("1h", None), ("12h", None), ("4h", "12h")]
 # edge is the selection, not the raw signal) and track them under a SEPARATE
 # label so the strict OTE scoreboard stays clean. Honest: these low-TF setups
 # are NOT proven profitable on their own — they are a feed to apply discretion.
-ENABLE_OTE_SCAN = True
+ENABLE_OTE_SCAN = False   # OFF with OTE (unproven low-TF feed; reduce clutter)
 OTE_SCAN_TFS = ["15m", "30m"]
 
 # Which timeframe must AGREE on direction before a Trend signal is allowed.
@@ -141,6 +143,15 @@ MAX_OPEN_PER_DIRECTION = 14     # of those, how many may be the same side
 
 ENABLE_TREND = False            # old EMA Trend strategy off (backtest: net loser)
 ENABLE_MSS = False              # standalone MSS off (backtest: ~break-even +0.04%); ICT (sweep+MSS+FVG) is the edge
+# ICT is LONG-ONLY (2026-08-09): its shorts were a disaster live (18% win,
+# -1.28%/tr) and in backtest (long-only +2.57%/tr @59% vs both-dirs +2.13%@47%).
+# The daily-trend gate + retrace entry both tested WORSE, so we just cut shorts.
+ICT_LONG_ONLY = True
+# Skip an ICT trade whose stop already sits > this % from entry (the move
+# over-extended before we'd enter = chasing your "already-run" concern). Backtest
+# (long-only): 8% is the sweet spot — cut one over-extended loser, +2.83%/tr @
+# 62.5% vs +2.57%@59% uncapped; 3-5% too tight, 12% no effect.
+ICT_MAX_STOP_PCT = 8.0
 # NOTE: the trend-following "TrendMA" (dualcross 20/100 SMA) strategy was REMOVED
 # 2026-08-06 — the lab's risk-adjusted "edge" never showed up in live paper
 # trading (12 trades, one -32.9% blow-up on a too-wide stop); pulled entirely.
@@ -370,10 +381,13 @@ def evaluate(closed, coin, timeframe, horizon):
 
     # ----- ICT model (sweep -> MSS -> FVG) -----
     ict = detect_ict(closed)
-    if ict:
-        result["signals"].append(
-            make("ICT", ict["direction"], 85, stop_level=ict["swept"])
-        )
+    if ict and (not ICT_LONG_ONLY or ict["direction"] == "LONG"):
+        entry = float(latest.close)
+        stop_dist = abs(entry - ict["swept"]) / entry * 100.0 if entry else 1e9
+        if ICT_MAX_STOP_PCT is None or stop_dist <= ICT_MAX_STOP_PCT:
+            result["signals"].append(
+                make("ICT", ict["direction"], 85, stop_level=ict["swept"])
+            )
 
     # ----- MSS strategy (sweep -> MSS, no FVG) — DISABLED: backtest ~break-even.
     #  The FVG confluence (in ICT) is what makes the edge. -----
