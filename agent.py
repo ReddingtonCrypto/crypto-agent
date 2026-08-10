@@ -175,7 +175,11 @@ def _load_pinned(path="pinned_universe.txt"):
 
 PINNED_COINS = _load_pinned()   # ~139 coins from the user's 11 TradingView lists
 
-UNIVERSE_SIZE = 60              # top N by mcap (40->50->60 per user) — applies to
+# Minimum 24h quote volume (USDT) for a PINNED watchlist coin to be scanned — the
+# liquidity floor / "confidence layer": top-N by mcap are always in; the user's
+# extra watchlist coins only join if they trade above this (drops dead small-caps).
+MIN_PINNED_VOL_USD = 500_000
+UNIVERSE_SIZE = 80              # top N by mcap (40->50->60->80 per user) — applies to
                                 # ALL strategies (ICT + CRT) via get_universe_ranked.
 
 # Money-flow gate: only take a signal when the coin is in a real volume surge
@@ -553,9 +557,20 @@ def run_agent():
     except Exception as e:
         print(f"ranked universe failed ({type(e).__name__}); mcap fallback.")
         coins = universe.get_universe(exchange, limit=100)[:UNIVERSE_SIZE]
-    # Pinned coins (the user's watchlists) always scanned, on top of the ranked
-    # top-N. Union, deduped, order preserved. Missing/illiquid ones fail soft.
-    coins = coins + [c for c in PINNED_COINS if c not in coins]
+    # Pinned coins (the user's watchlists) join the ranked top-N ONLY if they
+    # clear the liquidity floor (>= MIN_PINNED_VOL_USD 24h volume) — the extra
+    # confidence layer. Deduped. Fails soft to all-pinned if volume unavailable.
+    if PINNED_COINS:
+        try:
+            tk = exchange.fetch_tickers()
+            pinned_liquid = [c for c in PINNED_COINS if c not in coins and
+                             float((tk.get(c) or {}).get("quoteVolume") or 0) >= MIN_PINNED_VOL_USD]
+        except Exception as e:
+            print(f"pinned volume filter failed ({type(e).__name__}); adding all pinned.")
+            pinned_liquid = [c for c in PINNED_COINS if c not in coins]
+        coins = coins + pinned_liquid
+        print(f"Universe: top {UNIVERSE_SIZE} by mcap + {len(pinned_liquid)} liquid "
+              f"pinned (>= ${MIN_PINNED_VOL_USD/1e6:.0f}M/24h) = {len(coins)} coins")
     bias = market_bias()
 
     # Narrative awareness: which sectors is money rotating into right now.
