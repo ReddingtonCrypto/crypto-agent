@@ -243,7 +243,31 @@ def at_equal_liquidity(df, i, direction, swing_lb=3, lookback=40, tol=0.005, swi
     return None
 
 
-def at_key_level(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob", "eqhl"), swings=None):
+# --------------------------------------------------------------------------- #
+#  Quality gate — DISPLACEMENT (the energetic candle that makes a break a real MSS).
+# --------------------------------------------------------------------------- #
+def is_displacement(df, i, direction, lookback=20, body_mult=1.5, body_frac=0.5):
+    """Bar i is a DISPLACEMENT in `direction` — a large, fast, one-sided candle
+    (what separates a real Market Structure Shift from a routine wiggle):
+      * its body is >= body_mult x the recent average candle range, AND
+      * the body dominates the candle (>= body_frac of its high-low range), AND
+      * it closes in the trade direction (bullish for LONG, bearish for SHORT).
+    """
+    h = df["high"].to_numpy(); l = df["low"].to_numpy()
+    o = df["open"].to_numpy(); c = df["close"].to_numpy()
+    rng = h[i] - l[i]
+    if rng <= 0 or i < lookback:
+        return False
+    avg = (h[i - lookback:i] - l[i - lookback:i]).mean()
+    if avg <= 0:
+        return False
+    body = abs(c[i] - o[i])
+    if body < body_mult * avg or body < body_frac * rng:
+        return False
+    return c[i] > o[i] if direction == "LONG" else c[i] < o[i]
+
+
+def at_key_level(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob", "eqhl", "disp"), swings=None):
     if "oldhl" in types and at_old_high_low(df, i, direction, swings=swings):
         return "old high/low sweep"
     if "fvg" in types and at_fvg(df, i, direction):
@@ -254,10 +278,13 @@ def at_key_level(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob", "eqh
         return "order block"
     if "eqhl" in types and at_equal_liquidity(df, i, direction, swings=swings):
         return "equal highs/lows"
+    if "disp" in types and is_displacement(df, i, direction):
+        return "displacement"
     return None
 
 
-def count_key_levels(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob", "eqhl"), swings=None):
+def count_key_levels(df, i, direction,
+                     types=("oldhl", "fvg", "rejblock", "ob", "eqhl", "disp"), swings=None):
     """How many of the enabled key levels are present at once — the 'confluence'
     that separates an A+ setup (several stacking) from a marginal one (just one).
     Returns (count, labels)."""
@@ -272,4 +299,6 @@ def count_key_levels(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob", 
         labels.append("order block")
     if "eqhl" in types and at_equal_liquidity(df, i, direction, swings=swings):
         labels.append("equal highs/lows")
+    if "disp" in types and is_displacement(df, i, direction):
+        labels.append("displacement")
     return len(labels), labels
