@@ -148,7 +148,7 @@ def detect_crt_setup(df, kl_lookback=KL_LOOKBACK, min_confluence=1, min_rr=1.0):
 
 def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
                      level_lookback=40, min_age=5, spike_mult=2.5,
-                     kl_lookback=KL_LOOKBACK):
+                     min_stop_pct=0.015, kl_lookback=KL_LOOKBACK):
     """SCOUT detector — a REAL liquidity-sweep CRT you can validate on the chart.
 
     The last CLOSED candle must sweep a GENUINE prior SWING high/low (a level
@@ -233,6 +233,11 @@ def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
     stop = s_hi if direction == "SHORT" else s_lo
     risk = abs(entry - stop)
     if risk <= 0:
+        return None
+    # Reject noise-level stops: when the reversal candle closes near its own sweep
+    # extreme the stop sits right on top of the entry (a fraction of a %) and gets
+    # tagged by noise. Require the stop to be at least `min_stop_pct` from entry.
+    if entry > 0 and risk / entry < min_stop_pct:
         return None
 
     # Range = the swept level (C1 origin) -> the opposing pool (draw-on-liquidity).
