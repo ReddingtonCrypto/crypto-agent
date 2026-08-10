@@ -59,7 +59,22 @@ def _ensure_schema(conn):
     if "signal_ts" not in cols:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN signal_ts INTEGER")
         conn.commit()
+    if "alert_msg_id" not in cols:  # Telegram message_id of the setup alert, so
+        # TP/loss replies can be threaded to it.
+        conn.execute("ALTER TABLE paper_trades ADD COLUMN alert_msg_id INTEGER")
+        conn.commit()
     _SCHEMA_READY = True
+
+
+def set_alert_msg(trade_id, msg_id):
+    """Store the Telegram message_id of the setup alert on the trade."""
+    if msg_id is None:
+        return
+    conn = _conn()
+    _ensure_schema(conn)
+    conn.execute("UPDATE paper_trades SET alert_msg_id=? WHERE id=?", (int(msg_id), trade_id))
+    conn.commit()
+    conn.close()
 
 
 def has_open_trade(coin, direction, timeframe, strategy):
@@ -159,14 +174,14 @@ def get_pending(pending_id):
     conn = _conn()
     row = conn.execute(
         "SELECT id, coin, direction, entry, stop, tp1, tp2, timeframe, strategy, "
-        "status FROM paper_trades WHERE id=?",
+        "status, alert_msg_id FROM paper_trades WHERE id=?",
         (pending_id,),
     ).fetchone()
     conn.close()
     if not row:
         return None
     keys = ["id", "coin", "direction", "entry", "stop", "tp1", "tp2",
-            "timeframe", "strategy", "status"]
+            "timeframe", "strategy", "status", "alert_msg_id"]
     return dict(zip(keys, row))
 
 
@@ -342,13 +357,13 @@ def update_open_trades(bars):
     conn = _conn()
     rows = conn.execute(
         "SELECT id, coin, direction, entry, stop, tp1, tp2, timeframe, strategy, "
-        "opened_at, tp1_hit, realized_pct FROM paper_trades WHERE status='OPEN' "
+        "opened_at, tp1_hit, realized_pct, alert_msg_id FROM paper_trades WHERE status='OPEN' "
         "AND (strategy IS NULL OR strategy != 'TrendGated')"
     ).fetchall()
 
     events = []
     for (tid, coin, direction, entry, stop, tp1, tp2, timeframe, strategy,
-         opened_at, tp1_hit, realized_pct) in rows:
+         opened_at, tp1_hit, realized_pct, alert_msg_id) in rows:
         bar = bars.get(coin)
         if bar is None or not entry:  # skip missing data or bad (zero) entry
             continue
@@ -385,6 +400,7 @@ def update_open_trades(bars):
                 events.append({
                     "coin": coin, "direction": direction, "result": "TP1",
                     "pnl_pct": round(banked, 2), "timeframe": timeframe, "strategy": strategy,
+                    "alert_msg_id": alert_msg_id,
                 })
                 continue
 
@@ -400,6 +416,7 @@ def update_open_trades(bars):
                 events.append({
                     "coin": coin, "direction": direction, "result": outcome,
                     "pnl_pct": pnl, "timeframe": timeframe, "strategy": strategy,
+                    "alert_msg_id": alert_msg_id,
                 })
             continue
 
@@ -430,15 +447,16 @@ def update_open_trades(bars):
             events.append({
                 "coin": coin, "direction": direction, "result": result,
                 "pnl_pct": total, "timeframe": timeframe, "strategy": strategy,
+                "alert_msg_id": alert_msg_id,
             })
 
     # ---- Fills: promote WAITING (limit) trades to OPEN when price arrives, or
     #      cancel them if they wait past the time-stop without filling. ----
     waiting = conn.execute(
-        "SELECT id, coin, direction, entry, timeframe, opened_at, strategy "
+        "SELECT id, coin, direction, entry, timeframe, opened_at, strategy, alert_msg_id "
         "FROM paper_trades WHERE status='WAITING'"
     ).fetchall()
-    for (tid, coin, direction, entry, timeframe, opened_at, strategy) in waiting:
+    for (tid, coin, direction, entry, timeframe, opened_at, strategy, alert_msg_id) in waiting:
         bar = bars.get(coin)
         if bar is None or not entry:
             continue
@@ -449,14 +467,16 @@ def update_open_trades(bars):
                 (_now(), tid),
             )
             events.append({"coin": coin, "direction": direction, "result": "FILLED",
-                           "pnl_pct": 0.0, "timeframe": timeframe, "strategy": strategy})
+                           "pnl_pct": 0.0, "timeframe": timeframe, "strategy": strategy,
+                           "alert_msg_id": alert_msg_id})
         elif _expired(opened_at, timeframe):
             conn.execute(
                 "UPDATE paper_trades SET status='CANCELLED', closed_at=? WHERE id=?",
                 (_now(), tid),
             )
             events.append({"coin": coin, "direction": direction, "result": "CANCELLED",
-                           "pnl_pct": 0.0, "timeframe": timeframe, "strategy": strategy})
+                           "pnl_pct": 0.0, "timeframe": timeframe, "strategy": strategy,
+                           "alert_msg_id": alert_msg_id})
 
     conn.commit()
     conn.close()

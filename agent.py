@@ -543,6 +543,16 @@ def _scout_alert_text(coin, tf, s):
     )
 
 
+def _emit(text, reply_to=None):
+    """Send a Telegram message; if reply_to (a message_id) is given, thread it as
+    a REPLY to that alert (via the requests-based sender) so the original setup is
+    tagged. Else use the normal broadcast alert."""
+    if reply_to:
+        telegram_approve.send_message(text, reply_to=reply_to)
+    else:
+        asyncio.run(send_alert(text))
+
+
 def run_agent():
 
     print("\n==============================")
@@ -681,7 +691,9 @@ def run_agent():
                             SCOUT_STRATEGY, signal_ts=setup["signal_ts"])
                         if pid is None:
                             continue                    # already proposed this candle
-                        if telegram_approve.send_approval(pid, _scout_alert_text(coin, stf, setup)):
+                        mid = telegram_approve.send_approval(pid, _scout_alert_text(coin, stf, setup))
+                        if mid:
+                            paper_trading.set_alert_msg(pid, mid)   # thread later TP/loss replies
                             scout_count += 1
                     except Exception as e:
                         print(f"Error Scout {coin} {stf}: {type(e).__name__}: {e}")
@@ -756,33 +768,27 @@ def run_agent():
         mark = t["result"]
         emoji = {"WIN": "✅", "LOSS": "❌", "EXPIRED": "⌛", "TP1": "🎯"}.get(mark, "❌")
         tf = t.get("timeframe", "")
+        rt = t.get("alert_msg_id")   # reply to the original setup alert if we have it
         if mark == "TP1":
             print(f"TP1 hit (half banked): {t['coin']} {t['direction']} {tf} +{t['pnl_pct']}%")
-            asyncio.run(send_alert(
-                f"{emoji} TP1 HIT — half banked  {t['coin']}  {t['direction']}  ({tf})\n"
-                f"Locked: +{t['pnl_pct']}%  ·  runner to TP2, stop at break-even"
-            ))
+            _emit(f"{emoji} TP1 HIT — half banked  {t['coin']}  {t['direction']}  ({tf})\n"
+                  f"Locked: +{t['pnl_pct']}%  ·  runner to TP2, stop at break-even", reply_to=rt)
         elif mark == "FILLED":
             strat = t.get("strategy", "")
             print(f"Limit filled: {t['coin']} {t['direction']} {tf} — now tracking")
-            asyncio.run(send_alert(
-                f"▶️ FILLED — now tracking  {t['coin']}  {t['direction']}  ({tf}) {strat}"
-            ))
+            _emit(f"▶️ FILLED — now tracking  {t['coin']}  {t['direction']}  ({tf}) {strat}", reply_to=rt)
         elif mark == "CANCELLED":
             strat = t.get("strategy", "")
             print(f"Limit cancelled (unfilled): {t['coin']} {t['direction']} {tf}")
-            asyncio.run(send_alert(
-                f"🚫 CANCELLED — limit never filled  {t['coin']}  {t['direction']}  ({tf}) {strat}"
-            ))
+            _emit(f"🚫 CANCELLED — limit never filled  {t['coin']}  {t['direction']}  ({tf}) {strat}",
+                  reply_to=rt)
         else:
             reason = t.get("reason")
             why = f"  ·  {reason}" if reason else ""
             strat = t.get("strategy", "")
             print(f"Trade closed: {t['coin']} {t['direction']} {tf} {mark} {t['pnl_pct']}% {reason or ''}")
-            asyncio.run(send_alert(
-                f"{emoji} {mark}  {t['coin']}  {t['direction']}  ({tf}) {strat}{why}\n"
-                f"Result: {t['pnl_pct']}%"
-            ))
+            _emit(f"{emoji} {mark}  {t['coin']}  {t['direction']}  ({tf}) {strat}{why}\n"
+                  f"Result: {t['pnl_pct']}%", reply_to=rt)
 
     # 1b) BTC-regime-gated trend-following: manage LONG/FLAT trend positions.
     #     Hold an alt while alt>SMA & BTC>SMA (both on the daily); exit on either

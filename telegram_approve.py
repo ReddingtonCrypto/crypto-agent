@@ -38,35 +38,42 @@ def _write_offset(update_id):
         f.write(str(update_id))
 
 
-def send_message(text):
-    """Plain HTML message (confirmations). Returns True on success."""
+def send_message(text, reply_to=None):
+    """Plain HTML message (confirmations). If reply_to (a message_id) is given,
+    it is sent as a REPLY to that message so the original alert is tagged.
+    Returns True on success."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return False
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+    if reply_to:
+        payload["reply_to_message_id"] = int(reply_to)
+        payload["allow_sending_without_reply"] = True
     try:
-        r = requests.post(f"{_API}/sendMessage",
-                          json={"chat_id": TELEGRAM_CHAT_ID, "text": text,
-                                "parse_mode": "HTML"}, timeout=20)
+        r = requests.post(f"{_API}/sendMessage", json=payload, timeout=20)
         return r.ok
     except requests.RequestException:
         return False
 
 
 def send_approval(pending_id, text):
-    """Post a setup with Approve / Skip buttons. Returns True on success."""
+    """Post a setup with Approve / Decline buttons. Returns the sent message_id
+    (so callers can thread later TP/loss replies to it), or None on failure."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
+        return None
     keyboard = {"inline_keyboard": [[
         {"text": "✅ Approve", "callback_data": f"appr:{pending_id}"},
-        {"text": "❌ Skip", "callback_data": f"skip:{pending_id}"},
+        {"text": "❌ Decline", "callback_data": f"skip:{pending_id}"},
     ]]}
     try:
         r = requests.post(f"{_API}/sendMessage",
                           json={"chat_id": TELEGRAM_CHAT_ID, "text": text,
                                 "parse_mode": "HTML", "reply_markup": keyboard},
                           timeout=20)
-        return r.ok
-    except requests.RequestException:
-        return False
+        if r.ok:
+            return (r.json().get("result") or {}).get("message_id")
+        return None
+    except (requests.RequestException, ValueError):
+        return None
 
 
 def _answer(callback_id, text):
@@ -106,8 +113,9 @@ def _current_price(coin):
         return None
 
 
-def _handle(action, pid):
-    """Act on one button press: update the DB and send a confirmation."""
+def _handle(action, pid, reply_to=None):
+    """Act on one button press: update the DB and send a confirmation that REPLIES
+    to the original setup alert (reply_to = that alert's message_id)."""
     info = paper_trading.get_pending(pid)
     tag = f"{info['coin']} {info['direction']} ({info['timeframe']})" if info else f"#{pid}"
     if action == "appr":
@@ -115,18 +123,19 @@ def _handle(action, pid):
         tr = paper_trading.approve_pending(pid, current_price=price)
         if tr and tr.get("mode") == "market":
             send_message(f"✅ <b>{tag}</b> entered at MARKET — "
-                         f"<code>{tr['fill_price']:.6g}</code>. Tracking now.")
+                         f"<code>{tr['fill_price']:.6g}</code>. Tracking now.", reply_to=reply_to)
         elif tr and tr.get("mode") == "limit":
             send_message(f"⏳ <b>{tag}</b> — LIMIT set @ <code>{tr['fill_price']:.6g}</code>. "
-                         f"Waiting for price to reach it before it starts tracking.")
+                         f"Waiting for price to reach it before it starts tracking.", reply_to=reply_to)
         elif tr and tr.get("mode") == "expired":
             send_message(f"⚠️ <b>{tag}</b> — no trade: {tr['reason']} before you approved. "
-                         f"Skipped (no room left).")
+                         f"Skipped (no room left).", reply_to=reply_to)
         else:
-            send_message(f"⚠️ Couldn't open <b>{tag}</b> — already open/waiting or no longer pending.")
+            send_message(f"⚠️ Couldn't open <b>{tag}</b> — already open/waiting or no longer pending.",
+                         reply_to=reply_to)
     else:
         if paper_trading.reject_pending(pid):
-            send_message(f"❌ Skipped <b>{tag}</b>.")
+            send_message(f"❌ Declined <b>{tag}</b>.", reply_to=reply_to)
 
 
 def poll_once(timeout=25):
@@ -160,10 +169,11 @@ def poll_once(timeout=25):
         if action not in ("appr", "skip") or not pid.isdigit():
             _answer(cb_id, "unrecognised")
             continue
-        _answer(cb_id, "Approved ✅" if action == "appr" else "Skipped ❌")
-        _clear_buttons(msg.get("chat", {}).get("id"), msg.get("message_id"), action)
+        _answer(cb_id, "Approved ✅" if action == "appr" else "Declined ❌")
+        orig_msg_id = msg.get("message_id")   # the original setup alert
+        _clear_buttons(msg.get("chat", {}).get("id"), orig_msg_id, action)
         try:
-            _handle(action, int(pid))
+            _handle(action, int(pid), reply_to=orig_msg_id)
         except Exception as e:
             print(f"handle {action} #{pid} failed: {type(e).__name__}: {e}", flush=True)
         handled += 1
