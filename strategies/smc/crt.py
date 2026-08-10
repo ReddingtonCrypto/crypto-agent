@@ -18,6 +18,7 @@ C1. Returns {direction, stop, target, key_level} or None.
 """
 
 import bisect
+import math
 
 from strategies.smc.market_structure import find_swings
 from strategies.smc import key_levels
@@ -146,9 +147,51 @@ def detect_crt_setup(df, kl_lookback=KL_LOOKBACK, min_confluence=1, min_rr=1.0):
             "regime": "range" if trend is None else "with-trend"}
 
 
+def _round_step(p):
+    """Spacing of the 'obvious' round numbers around price p (one tenth of its
+    decade): 65043 -> 1000 (65000, 66000), 2.077 -> 0.1 (2.0, 2.1),
+    0.1003 -> 0.01 (0.10, 0.11). Those figures are where the crowd's stops sit."""
+    return 10.0 ** (math.floor(math.log10(p)) - 1) if p > 0 else 0.0
+
+
+def _sl_beyond_wick(stop, direction, buffer_pct=0.0015, clear_pct=0.0035):
+    """Push the stop slightly BEYOND the sweep wick, onto a deliberately ODD price.
+
+    Price very often runs a little past the sweep extreme before turning, and it
+    is drawn to round figures because that is where everyone's stops are resting.
+    A stop sitting exactly on the wick — or worse, just short of a round number —
+    is the easiest liquidity in the market. So:
+      1. step a small buffer past the wick (away from entry),
+      2. if an obvious round level sits just beyond that, jump clear of it,
+      3. settle on an odd, non-round tick (5 significant digits).
+    Every adjustment moves AWAY from entry, so the stop can only widen, never
+    tighten. SHORT stops sit above price, LONG stops below.
+    """
+    if stop <= 0:
+        return stop
+    up = direction == "SHORT"            # which way is "away from entry"
+    sign = 1.0 if up else -1.0
+    s = stop * (1.0 + sign * buffer_pct)
+
+    # 2) never park just short of a round number - price hunts straight through it
+    step = _round_step(s)
+    if step > 0:
+        nxt = (math.ceil(s / step) if up else math.floor(s / step)) * step
+        if abs(nxt - s) <= s * clear_pct:
+            s = nxt * (1.0 + sign * buffer_pct)
+
+    # 3) land on an odd, arbitrary-looking tick rather than a clean figure
+    tick = 10.0 ** (math.floor(math.log10(s)) - 4)
+    n = int(math.ceil(s / tick) if up else math.floor(s / tick))
+    while n % 10 not in (1, 3, 7, 9):
+        n += 1 if up else -1
+    return n * tick
+
+
 def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
                      level_lookback=40, min_age=5, spike_mult=2.5,
-                     min_stop_pct=0.015, kl_lookback=KL_LOOKBACK):
+                     min_stop_pct=0.015, sl_buffer_pct=0.0015,
+                     kl_lookback=KL_LOOKBACK):
     """SCOUT detector — a REAL liquidity-sweep CRT you can validate on the chart.
 
     The last CLOSED candle must sweep a GENUINE prior SWING high/low (a level
@@ -161,7 +204,9 @@ def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
     poke above the *previous candle* no longer qualifies. Direction = the
     reversal (NO trend filter).
 
-    Entry = the candle's close. Stop = the sweep wick (the swept extreme). Target
+    Entry = the candle's close. Stop = slightly BEYOND the sweep wick, nudged onto
+    an odd/non-round price (see `_sl_beyond_wick`) so the common overshoot and the
+    round-number stop hunt don't tag it. Target
     (TP2) = the nearest prior opposing swing level (the draw-on-liquidity) that
     yields >= `min_rr`; TP1 = halfway there. Confluence = the swept swing (always
     1) + any FVG / rejection block also at the sweep. Returns
@@ -230,7 +275,10 @@ def detect_crt_scout(df, min_confluence=1, min_rr=1.0, swing_lb=5,
     level = short_lvl if direction == "SHORT" else long_lvl
 
     entry = s_close
-    stop = s_hi if direction == "SHORT" else s_lo
+    # Stop goes slightly BEYOND the sweep wick, on an odd (non-round) price —
+    # price commonly runs a touch past the extreme, and round figures are hunted.
+    stop = _sl_beyond_wick(s_hi if direction == "SHORT" else s_lo,
+                           direction, buffer_pct=sl_buffer_pct)
     risk = abs(entry - stop)
     if risk <= 0:
         return None
