@@ -262,6 +262,63 @@ def reject_pending(pending_id):
     return n > 0
 
 
+# --------------------------------------------------------------------------- #
+#  TREND positions (BTC-regime-gated trend-following) — a persistent LONG/FLAT
+#  position that exits on a SIGNAL flip (trend or BTC regime turns off), NOT on a
+#  fixed TP/SL. Tracked separately so update_open_trades leaves them alone.
+# --------------------------------------------------------------------------- #
+def open_trend(coin, entry, timeframe, strategy="TrendGated", signal_ts=None):
+    """Open a trend LONG (once per coin+strategy). Returns True if opened."""
+    conn = _conn()
+    _ensure_schema(conn)
+    dupe = conn.execute(
+        "SELECT 1 FROM paper_trades WHERE coin=? AND strategy=? AND status='OPEN' LIMIT 1",
+        (coin, strategy),
+    ).fetchone()
+    if dupe:
+        conn.close()
+        return False
+    conn.execute(
+        "INSERT INTO paper_trades (coin, direction, entry, timeframe, strategy, "
+        "status, opened_at, signal_ts) VALUES (?, 'LONG', ?, ?, ?, 'OPEN', ?, ?)",
+        (coin, entry, timeframe, strategy, _now(),
+         int(signal_ts) if signal_ts is not None else None),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_open_trends(strategy="TrendGated"):
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT id, coin, entry, timeframe FROM paper_trades "
+        "WHERE strategy=? AND status='OPEN'", (strategy,),
+    ).fetchall()
+    conn.close()
+    return [{"id": r[0], "coin": r[1], "entry": r[2], "timeframe": r[3]} for r in rows]
+
+
+def close_trend(trade_id, exit_price):
+    """Close a trend LONG at exit_price (signal flip). Returns {result, pnl_pct}."""
+    conn = _conn()
+    row = conn.execute("SELECT entry FROM paper_trades WHERE id=? AND status='OPEN'",
+                       (trade_id,)).fetchone()
+    if not row or not row[0]:
+        conn.close()
+        return None
+    entry = row[0]
+    pnl = round((exit_price - entry) / entry * 100.0, 2)
+    result = "WIN" if pnl > 0 else "LOSS"
+    conn.execute(
+        "UPDATE paper_trades SET status=?, closed_at=?, exit_price=?, pnl_pct=? WHERE id=?",
+        (result, _now(), exit_price, pnl, trade_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"result": result, "pnl_pct": pnl}
+
+
 PARTIAL_FRAC = 0.5   # fraction of the position banked at TP1 (rest runs to TP2)
 
 
@@ -285,7 +342,8 @@ def update_open_trades(bars):
     conn = _conn()
     rows = conn.execute(
         "SELECT id, coin, direction, entry, stop, tp1, tp2, timeframe, strategy, "
-        "opened_at, tp1_hit, realized_pct FROM paper_trades WHERE status='OPEN'"
+        "opened_at, tp1_hit, realized_pct FROM paper_trades WHERE status='OPEN' "
+        "AND (strategy IS NULL OR strategy != 'TrendGated')"
     ).fetchall()
 
     events = []

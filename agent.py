@@ -143,6 +143,15 @@ MAX_OPEN_PER_DIRECTION = 14     # of those, how many may be the same side
 
 ENABLE_TREND = False            # old EMA Trend strategy off (backtest: net loser)
 ENABLE_MSS = False              # standalone MSS off (backtest: ~break-even +0.04%); ICT (sweep+MSS+FVG) is the edge
+# BTC-REGIME-GATED TREND-FOLLOWING (strategy="TrendGated") — the validated crypto
+# edge (2026-08-09). Hold an alt LONG only while the alt AND BTC are both above
+# their daily SMA(TREND_SMA); exit the moment either flips. Long/flat, NO stop
+# (exits by signal — the flaw that blew up the old Trend strategy is gone).
+# Walk-forward + fees: beat buy-and-hold on return, Sharpe AND drawdown in every
+# window (full +4728%/0.82 Sharpe vs +2120%/0.67; lower DD throughout). Paper.
+ENABLE_TREND_GATED = True
+TREND_SMA = 50
+TREND_TF = "1d"
 # ICT is LONG-ONLY (2026-08-09): its shorts were a disaster live (18% win,
 # -1.28%/tr) and in backtest (long-only +2.57%/tr @59% vs both-dirs +2.13%@47%).
 # The daily-trend gate + retrace entry both tested WORSE, so we just cut shorts.
@@ -265,6 +274,17 @@ def _closed_df(coin, tf, per_tf):
     return pd.DataFrame(
         candles, columns=["timestamp", "open", "high", "low", "close", "volume"]
     ).iloc[:-1]
+
+
+def _above_sma(df, length):
+    """True/False if the last CLOSED candle's close is above/below its rolling
+    SMA(length); None if there isn't enough data."""
+    if df is None or len(df) < length + 1:
+        return None
+    sma = df["close"].rolling(length).mean().iloc[-1]
+    if pd.isna(sma):
+        return None
+    return float(df["close"].iloc[-1]) > float(sma)
 
 
 def evaluate(closed, coin, timeframe, horizon):
@@ -537,6 +557,7 @@ def run_agent():
     signals = []
     bar_map = {}
     scout_count = 0        # CRT-Scout setups proposed for approval this scan
+    trend_daily = {}       # coin -> closed daily df (for the BTC-gated trend pass)
     # CRT SMT reference: BTC & ETH daily candles (fetched once per scan).
     crt_btc_1d = _closed_df("BTC/USDT", "1d", {}) if ENABLE_CRT else None
     crt_eth_1d = _closed_df("ETH/USDT", "1d", {}) if ENABLE_CRT else None
@@ -556,6 +577,9 @@ def run_agent():
                     })
             except Exception as e:
                 print(f"Error scanning {coin} {tf}: {type(e).__name__}: {e}")
+
+        if ENABLE_TREND_GATED:
+            trend_daily[coin] = _closed_df(coin, TREND_TF, per_tf)
 
         # Now collect signals, applying multi-timeframe confirmation.
         for horizon, tf in TIMEFRAMES:
@@ -730,6 +754,48 @@ def run_agent():
                 f"{emoji} {mark}  {t['coin']}  {t['direction']}  ({tf}) {strat}{why}\n"
                 f"Result: {t['pnl_pct']}%"
             ))
+
+    # 1b) BTC-regime-gated trend-following: manage LONG/FLAT trend positions.
+    #     Hold an alt while alt>SMA & BTC>SMA (both on the daily); exit on either
+    #     flip. Signal changes only when a new daily candle closes, so this is
+    #     quiet intraday (dedup stops re-opening the same position).
+    if ENABLE_TREND_GATED:
+        try:
+            btc_df = trend_daily.get("BTC/USDT") or _closed_df("BTC/USDT", TREND_TF, {})
+            btc_bull = _above_sma(btc_df, TREND_SMA)
+            opened = closed = 0
+            # EXITS first: close any open trend whose alt fell below SMA, or BTC
+            # regime turned off.
+            for t in paper_trading.get_open_trends():
+                adf = trend_daily.get(t["coin"]) or _closed_df(t["coin"], TREND_TF, {})
+                if adf is None:
+                    continue
+                alt_bull = _above_sma(adf, TREND_SMA)
+                if btc_bull is False or alt_bull is False:
+                    res = paper_trading.close_trend(t["id"], float(adf["close"].iloc[-1]))
+                    if res:
+                        closed += 1
+                        print(f"Trend EXIT {t['coin']} {res['result']} {res['pnl_pct']}%")
+            # ENTRIES: only when BTC is bullish, open flat alts that are above SMA.
+            if btc_bull:
+                held = {t["coin"] for t in paper_trading.get_open_trends()}
+                for coin in coins:
+                    if coin in held or coin == "BTC/USDT":
+                        continue
+                    adf = trend_daily.get(coin)
+                    if adf is not None and _above_sma(adf, TREND_SMA):
+                        if paper_trading.open_trend(
+                                coin, float(adf["close"].iloc[-1]), TREND_TF,
+                                signal_ts=int(adf["timestamp"].iloc[-1])):
+                            opened += 1
+            if opened or closed:
+                regime = "BTC bullish" if btc_bull else "BTC bearish"
+                asyncio.run(send_alert(
+                    f"📈 Trend ({regime}) — opened {opened}, closed {closed} "
+                    f"BTC-gated alt-trend position(s)."))
+                print(f"TrendGated: opened {opened}, closed {closed} (btc_bull={btc_bull})")
+        except Exception as e:
+            print(f"Error TrendGated: {type(e).__name__}: {e}")
 
     # 2) Soft market-bias tilt: favour BTC's direction, but don't hard-block —
     #    a strong enough counter-setup can still pass. (Caps handle concentration.)
