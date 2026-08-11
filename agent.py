@@ -159,7 +159,7 @@ TREND_TF = "1d"
 # which tests +1.32%/trade better on the SAME setups. No new ICT trades open
 # while this is False; trades already open keep being managed to their TP/SL.
 ENABLE_ICT = False
-# ICT-FVG (2026-08-11) — the 2022 ICT model rebuilt from the source lectures and
+# "ICT new" (2026-08-11) — the 2022 ICT model rebuilt from the source lectures and
 # run as a HUMAN-APPROVAL scout, exactly like CRT: it proposes, you decide.
 # Verified on 2,359 historical setups across the live universe: +0.70%/trade
 # (t=+5.9) vs the old auto-ICT's -1.02%, positive in BOTH walk-forward halves,
@@ -170,15 +170,20 @@ ENABLE_ICT = False
 # streaks will feel worse than the average suggests.
 ENABLE_ICT_SCOUT = True
 ICT_SCOUT_TFS = ["4h", "1d"]     # 1w had only 12 historical setups — too few
-ICT_SCOUT_STRATEGY = "ICT-FVG"
+ICT_SCOUT_STRATEGY = "ICT new"
 # USABILITY gates, NOT edge improvements — be honest about this. Unfiltered
 # scores best statistically (+0.701%/tr, t=+5.9); these two cost a little of that
 # (+0.696%, t=+3.3) and roughly halve the alert volume, in exchange for never
 # proposing a trade that risks 4% to make 0.4%, or one whose stop sits inside the
 # noise. Same thresholds as the CRT scout, so both feeds behave consistently.
-# Raising min R:R further actively BREAKS it (>=2.0 turns the recent half
-# negative) — do not tighten this without re-running the test.
-ICT_SCOUT_MIN_RR = 1.0
+# Min R:R 1.1 set by the user. Tested: 1.0 -> +0.620%/tr (t=3.3), 1.1 -> +0.557%
+# (t=2.8), 1.2 -> +0.679% (t=3.2) — the differences between them are noise, all
+# fine. But raising it FURTHER actively BREAKS it (>=2.0 turns the recent half
+# negative) — do not tighten past ~1.5 without re-running the test.
+# The CRT odd-price placement was tested here and REJECTED: -0.183%/tr, t=-6.5.
+# It lifts the win rate (54.6->58.0%) but loses money — CRT stops sit on sweep
+# wicks that really are hunted, ICT stops sit on gap edges that are not.
+ICT_SCOUT_MIN_RR = 1.1
 ICT_SCOUT_MIN_STOP_PCT = 0.015
 # ICT is LONG-ONLY (2026-08-09): its shorts were a disaster live (18% win,
 # -1.28%/tr) and in backtest (long-only +2.57%/tr @59% vs both-dirs +2.13%@47%).
@@ -576,7 +581,7 @@ def _ict_alert_text(coin, tf, s):
     at the gap, so it is spelled out — price has to come back to fill it."""
     risk = abs(s["entry"] - s["stop"])
     return (
-        f"📐 <b>ICT-FVG</b> · <b>{coin}</b> · {tf}  🟢 LONG\n"
+        f"📐 <b>ICT new</b> · <b>{coin}</b> · {tf}  🟢 LONG\n"
         f"<code>Entry {s['entry']:.6g}  (limit — waits for the retrace)</code>\n"
         f"<code>Stop  {s['stop']:.6g}  ({risk/s['entry']*100:.1f}%)</code>\n"
         f"<code>TP1   {s['tp1']:.6g}</code>\n"
@@ -639,7 +644,7 @@ def run_agent():
     signals = []
     bar_map = {}
     scout_count = 0        # CRT-Scout setups proposed for approval this scan
-    ict_scout_count = 0    # ICT-FVG setups proposed for approval this scan
+    ict_scout_count = 0    # "ICT new" setups proposed for approval this scan
     trend_daily = {}       # coin -> closed daily df (for the BTC-gated trend pass)
     # CRT SMT reference: BTC & ETH daily candles (fetched once per scan).
     crt_btc_1d = _closed_df("BTC/USDT", "1d", {}) if ENABLE_CRT else None
@@ -742,7 +747,7 @@ def run_agent():
                     except Exception as e:
                         print(f"Error Scout {coin} {stf}: {type(e).__name__}: {e}")
 
-        # ----- ICT-FVG pass: the source-faithful 2022 model, proposed for HUMAN
+        # ----- "ICT new" pass: the source-faithful 2022 model, proposed for HUMAN
         #  approval like CRT. Entry is a LIMIT at the fair value gap, so approving
         #  it usually creates a WAITING trade that fills only if price returns. -----
         if ENABLE_ICT_SCOUT:
@@ -770,7 +775,7 @@ def run_agent():
                         paper_trading.set_alert_msg(pid, mid)
                         ict_scout_count += 1
                 except Exception as e:
-                    print(f"Error ICT-FVG {coin} {itf}: {type(e).__name__}: {e}")
+                    print(f"Error ICT new {coin} {itf}: {type(e).__name__}: {e}")
 
         # ----- OTE (Textbook Setup) pass: fire on the last-closed-bar limit fill,
         #  optionally gated by higher-timeframe structure (4h gated by 12h). -----
@@ -1114,7 +1119,7 @@ Price: {best['price']}
     if ENABLE_CRT_SCOUT:
         print(f"CRT: {scout_count} new setup(s) sent for approval this scan.")
     if ENABLE_ICT_SCOUT:
-        print(f"ICT-FVG: {ict_scout_count} new setup(s) sent for approval this scan.")
+        print(f"ICT new: {ict_scout_count} new setup(s) sent for approval this scan.")
 
 
 # Loop forever only when run directly (python agent.py) — e.g. as a 24/7
