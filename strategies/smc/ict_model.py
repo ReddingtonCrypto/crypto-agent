@@ -11,8 +11,100 @@ approximation of a discretionary concept, so it fires rarely (by design).
 Returns {"direction": "LONG"|"SHORT", "swept": level} or None.
 """
 
+import numpy as np
+
 from strategies.smc.market_structure import find_swings
 from strategies.smc.smc_features import fair_value_gap
+
+
+def _pivots(h, l, i, lb, lookback):
+    """Pivot highs/lows strictly BEFORE bar i (no lookahead)."""
+    hi, lo = [], []
+    for k in range(max(lb, i - lookback), i - lb):
+        if h[k] == max(h[k - lb:k + lb + 1]):
+            hi.append((k, float(h[k])))
+        if l[k] == min(l[k - lb:k + lb + 1]):
+            lo.append((k, float(l[k])))
+    return hi, lo
+
+
+def detect_ict_source(df, window=12, swing_lb=2, lookback=60, fvg_search=4,
+                      max_stop_pct=0.08):
+    """The 2022 ICT model as the SOURCE lectures actually specify it.
+
+    The previous `detect_ict` kept the sweep+shift trigger but invented its own
+    entry, stop and target. Measured on 1,856 paired historical setups that cost
+    -1.02%/trade; the source's geometry on the SAME signals returned +0.65%.
+    What the lectures say, and what this implements:
+
+      * entry  : a LIMIT at the near edge of the fair value gap left by the
+                 displacement leg -- "place a buy limit order at the low of the
+                 premium high of the fair value gap". You wait for the retrace
+                 instead of chasing the shift candle's close.
+      * stop   : just beyond the candle framing the gap's far edge -- "right at
+                 the high, not one tick above it", deliberately tight.
+      * target : the nearest prior swing high ABOVE the current close. An entry
+                 at a gap is INTERNAL range liquidity, and internal entries run
+                 to EXTERNAL liquidity (Model 9's alternation rule). This is the
+                 piece that carries the edge: fixed 2R and 4R targets both fail
+                 walk-forward, this one is positive in both halves.
+
+    Returns {direction, entry, stop, tp1, tp2, rr, key_level, confluence,
+    signal_ts} shaped like detect_crt_scout so the approval flow can reuse it,
+    or None. LONG only -- shorts were never validated.
+    """
+    n = len(df)
+    if n < max(lookback + 10, 60):
+        return None
+    o = df["open"].to_numpy(); h = df["high"].to_numpy()
+    l = df["low"].to_numpy(); c = df["close"].to_numpy()
+    i = n - 1
+
+    hi, lo = _pivots(h, l, i, swing_lb, lookback)
+    if not hi or not lo:
+        return None
+    swing_high = hi[-1][1]
+    swing_low = lo[-1][1]
+
+    # 1. sell-side raid, then a shift that closes above the opposing pivot
+    a = max(0, i - window)
+    if not (l[a:i + 1].min() < swing_low and c[i] > swing_high):
+        return None
+
+    # 2. the fair value gap left by that leg (nearest first)
+    gap = None
+    for k in range(i, max(i - fvg_search, 2) - 1, -1):
+        if h[k - 2] < l[k]:
+            gap = {"entry": float(l[k]), "far": float(h[k - 2]),
+                   "stop": float(l[k - 2])}
+            break
+    if gap is None:
+        return None
+
+    entry, stop = gap["entry"], gap["stop"]
+    risk = entry - stop
+    if risk <= 0 or entry <= 0 or risk / entry > max_stop_pct:
+        return None
+
+    # 3. target the nearest prior swing high still ABOVE current price
+    above = [p for _, p in hi if p > c[i]]
+    if not above:
+        return None
+    tp2 = min(above)
+    if tp2 <= entry:
+        return None
+    tp1 = entry + (tp2 - entry) * 0.5          # halfway, for the partial
+
+    return {
+        "direction": "LONG",
+        "entry": round(entry, 8), "stop": round(stop, 8),
+        "tp1": round(tp1, 8), "tp2": round(tp2, 8),
+        "rr": round((tp2 - entry) / risk, 2),
+        "key_level": (f"swept low @ {swing_low:.6g}, FVG entry {entry:.6g}, "
+                      f"target old high {tp2:.6g}"),
+        "confluence": 1,
+        "signal_ts": int(df["timestamp"].iloc[i]),
+    }
 
 
 def detect_mss(df, window=12):

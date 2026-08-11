@@ -17,7 +17,7 @@ from regime_engine import get_regime
 from market_filter import market_quality
 from strategies.smc.market_structure import detect_structure
 from strategies.smc.smc_features import analyze as smc_analyze
-from strategies.smc.ict_model import detect_ict, detect_mss
+from strategies.smc.ict_model import detect_ict, detect_ict_source, detect_mss
 from strategies.smc.crt import (
     detect_crt_aligned, detect_crt_setup, detect_crt_enhanced, detect_crt_scout)
 import telegram_approve
@@ -152,6 +152,34 @@ ENABLE_MSS = False              # standalone MSS off (backtest: ~break-even +0.0
 ENABLE_TREND_GATED = False      # DISABLED 2026-08-10 per user — auto trades cluttered the CRT view; keep CRT + ICT only
 TREND_SMA = 50
 TREND_TF = "1d"
+# PAUSED 2026-08-11 while the model is rebuilt from the ICT source lectures.
+# Measured on 1,856 paired historical setups, the current entry/stop loses
+# -1.02%/trade (t=-6.6; -1.85%/tr in the recent half). The source places the
+# entry as a LIMIT at the fair-value-gap edge and the stop just beyond the gap,
+# which tests +1.32%/trade better on the SAME setups. No new ICT trades open
+# while this is False; trades already open keep being managed to their TP/SL.
+ENABLE_ICT = False
+# ICT-FVG (2026-08-11) — the 2022 ICT model rebuilt from the source lectures and
+# run as a HUMAN-APPROVAL scout, exactly like CRT: it proposes, you decide.
+# Verified on 2,359 historical setups across the live universe: +0.70%/trade
+# (t=+5.9) vs the old auto-ICT's -1.02%, positive in BOTH walk-forward halves,
+# profitable on 65% of coins, and positive at every parameter setting tested and
+# at triple fees. Deliberately labelled separately from the legacy "ICT" rows so
+# this forward test is judged on its own record.
+# CAVEAT worth remembering: the profit sits in the top ~10% of trades, so losing
+# streaks will feel worse than the average suggests.
+ENABLE_ICT_SCOUT = True
+ICT_SCOUT_TFS = ["4h", "1d"]     # 1w had only 12 historical setups — too few
+ICT_SCOUT_STRATEGY = "ICT-FVG"
+# USABILITY gates, NOT edge improvements — be honest about this. Unfiltered
+# scores best statistically (+0.701%/tr, t=+5.9); these two cost a little of that
+# (+0.696%, t=+3.3) and roughly halve the alert volume, in exchange for never
+# proposing a trade that risks 4% to make 0.4%, or one whose stop sits inside the
+# noise. Same thresholds as the CRT scout, so both feeds behave consistently.
+# Raising min R:R further actively BREAKS it (>=2.0 turns the recent half
+# negative) — do not tighten this without re-running the test.
+ICT_SCOUT_MIN_RR = 1.0
+ICT_SCOUT_MIN_STOP_PCT = 0.015
 # ICT is LONG-ONLY (2026-08-09): its shorts were a disaster live (18% win,
 # -1.28%/tr) and in backtest (long-only +2.57%/tr @59% vs both-dirs +2.13%@47%).
 # The daily-trend gate + retrace entry both tested WORSE, so we just cut shorts.
@@ -415,7 +443,7 @@ def evaluate(closed, coin, timeframe, horizon):
         ))
 
     # ----- ICT model (sweep -> MSS -> FVG) -----
-    ict = detect_ict(closed)
+    ict = detect_ict(closed) if ENABLE_ICT else None
     if ict and (not ICT_LONG_ONLY or ict["direction"] == "LONG"):
         entry = float(latest.close)
         stop_dist = abs(entry - ict["swept"]) / entry * 100.0 if entry else 1e9
@@ -543,6 +571,21 @@ def _scout_alert_text(coin, tf, s):
     )
 
 
+def _ict_alert_text(coin, tf, s):
+    """Telegram body for an ICT-FVG setup awaiting approval. The entry is a LIMIT
+    at the gap, so it is spelled out — price has to come back to fill it."""
+    risk = abs(s["entry"] - s["stop"])
+    return (
+        f"📐 <b>ICT-FVG</b> · <b>{coin}</b> · {tf}  🟢 LONG\n"
+        f"<code>Entry {s['entry']:.6g}  (limit — waits for the retrace)</code>\n"
+        f"<code>Stop  {s['stop']:.6g}  ({risk/s['entry']*100:.1f}%)</code>\n"
+        f"<code>TP1   {s['tp1']:.6g}</code>\n"
+        f"<code>TP2   {s['tp2']:.6g}</code>\n"
+        f"🔑 {s['key_level']}\n"
+        f"R:R ≈ {s['rr']:.1f}"
+    )
+
+
 def _emit(text, reply_to=None):
     """Send a Telegram message; if reply_to (a message_id) is given, thread it as
     a REPLY to that alert (via the requests-based sender) so the original setup is
@@ -596,6 +639,7 @@ def run_agent():
     signals = []
     bar_map = {}
     scout_count = 0        # CRT-Scout setups proposed for approval this scan
+    ict_scout_count = 0    # ICT-FVG setups proposed for approval this scan
     trend_daily = {}       # coin -> closed daily df (for the BTC-gated trend pass)
     # CRT SMT reference: BTC & ETH daily candles (fetched once per scan).
     crt_btc_1d = _closed_df("BTC/USDT", "1d", {}) if ENABLE_CRT else None
@@ -697,6 +741,36 @@ def run_agent():
                             scout_count += 1
                     except Exception as e:
                         print(f"Error Scout {coin} {stf}: {type(e).__name__}: {e}")
+
+        # ----- ICT-FVG pass: the source-faithful 2022 model, proposed for HUMAN
+        #  approval like CRT. Entry is a LIMIT at the fair value gap, so approving
+        #  it usually creates a WAITING trade that fills only if price returns. -----
+        if ENABLE_ICT_SCOUT:
+            for itf in ICT_SCOUT_TFS:
+                try:
+                    idf = _closed_df(coin, itf, per_tf)
+                    if idf is None:
+                        continue
+                    setup = detect_ict_source(idf)
+                    if not setup:
+                        continue
+                    stop_pct = abs(setup["entry"] - setup["stop"]) / setup["entry"]
+                    if (setup["rr"] < ICT_SCOUT_MIN_RR
+                            or stop_pct < ICT_SCOUT_MIN_STOP_PCT):
+                        continue                        # usability gate, see config
+                    pid = paper_trading.create_pending(
+                        coin, setup["direction"], setup["entry"], setup["stop"],
+                        setup["tp1"], setup["tp2"], setup["confluence"], itf,
+                        ICT_SCOUT_STRATEGY, signal_ts=setup["signal_ts"])
+                    if pid is None:
+                        continue                        # already proposed this candle
+                    mid = telegram_approve.send_approval(
+                        pid, _ict_alert_text(coin, itf, setup))
+                    if mid:
+                        paper_trading.set_alert_msg(pid, mid)
+                        ict_scout_count += 1
+                except Exception as e:
+                    print(f"Error ICT-FVG {coin} {itf}: {type(e).__name__}: {e}")
 
         # ----- OTE (Textbook Setup) pass: fire on the last-closed-bar limit fill,
         #  optionally gated by higher-timeframe structure (4h gated by 12h). -----
@@ -1039,6 +1113,8 @@ Price: {best['price']}
 
     if ENABLE_CRT_SCOUT:
         print(f"CRT: {scout_count} new setup(s) sent for approval this scan.")
+    if ENABLE_ICT_SCOUT:
+        print(f"ICT-FVG: {ict_scout_count} new setup(s) sent for approval this scan.")
 
 
 # Loop forever only when run directly (python agent.py) — e.g. as a 24/7
