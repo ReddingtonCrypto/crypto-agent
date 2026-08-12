@@ -113,6 +113,73 @@ def _current_price(coin):
         return None
 
 
+STALE_FRAC = 0.30       # matches agent.PENDING_EXPIRE_FRAC
+
+
+def _pending_state(row):
+    """(label, is_stale) describing how far a waiting setup has already run."""
+    price = _current_price(row[1])
+    moved, invalid = paper_trading.pending_progress(row, price)
+    if invalid:
+        return "stop already hit", True
+    if moved is None:
+        return "no price", False
+    if moved >= STALE_FRAC:
+        return f"ran {moved * 100:.0f}% — too late", True
+    if moved < 0:
+        return "still ahead of entry", False
+    return f"ran {moved * 100:.0f}%", False
+
+
+def send_pending_list():
+    """Post every setup still waiting, each with its own Drop button.
+
+    The Approve/Decline buttons only live on the original alert, which scrolls
+    away within hours. This is how you clear out something you decided against
+    days ago, or that has simply sat too long to be worth entering.
+    """
+    rows = paper_trading.list_pending()
+    if not rows:
+        send_message("✅ Nothing is waiting for your approval.")
+        return True
+
+    lines = [f"🔔 <b>{len(rows)} setup(s) waiting for you</b>"]
+    keyboard, stale = [], 0
+    for r in rows[:20]:                      # keep the keyboard tappable
+        tid, coin, direction, _e, _s, _t1, _t2, tf, strat, _o = r
+        label, is_stale = _pending_state(r)
+        if is_stale:
+            stale += 1
+        mark = "⚠️ " if is_stale else ""
+        lines.append(f"{mark}<code>#{tid}</code> {coin} {tf} {direction}"
+                     f" · {strat} · {label}")
+        keyboard.append([{"text": f"❌ Drop #{tid} · {coin} {tf}",
+                          "callback_data": f"drop:{tid}"}])
+    if len(rows) > 20:
+        lines.append(f"…and {len(rows) - 20} more")
+    if stale:
+        keyboard.append([{"text": f"🧹 Drop all {stale} that are too late",
+                          "callback_data": "dropstale:0"}])
+
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": "\n".join(lines),
+               "parse_mode": "HTML",
+               "reply_markup": {"inline_keyboard": keyboard}}
+    try:
+        return requests.post(f"{_API}/sendMessage", json=payload, timeout=20).ok
+    except requests.RequestException:
+        return False
+
+
+def _drop_stale():
+    """Decline every waiting setup whose move has already gone. Returns how many."""
+    n = 0
+    for r in paper_trading.list_pending():
+        _label, is_stale = _pending_state(r)
+        if is_stale and paper_trading.reject_pending(r[0]):
+            n += 1
+    return n
+
+
 def _handle(action, pid, reply_to=None):
     """Act on one button press: update the DB and send a confirmation that REPLIES
     to the original setup alert (reply_to = that alert's message_id)."""
@@ -147,7 +214,8 @@ def poll_once(timeout=25):
     try:
         r = requests.get(f"{_API}/getUpdates",
                          params={"offset": offset + 1, "timeout": timeout,
-                                 "allowed_updates": '["callback_query"]'},
+                                 # messages too, so /pending can be typed
+                                 "allowed_updates": '["callback_query","message"]'},
                          timeout=timeout + 10)
         data = r.json()
     except (requests.RequestException, ValueError):
@@ -159,6 +227,27 @@ def poll_once(timeout=25):
     last_id = offset
     for upd in data.get("result", []):
         last_id = max(last_id, upd["update_id"])
+        # Typed commands. /pending posts the waiting list with a Drop button on
+        # each one — the Approve/Decline buttons only exist on the original
+        # alert, which has long scrolled away by the time you want to clear up.
+        text = ((upd.get("message") or {}).get("text") or "").strip().lower()
+        if text:
+            cmd = text.split()[0].split("@")[0]
+            if cmd in ("/pending", "/p", "/waiting"):
+                send_pending_list()
+                handled += 1
+            elif cmd in ("/dropstale", "/clean"):
+                n = _drop_stale()
+                send_message(f"🧹 Dropped {n} setup(s) that were too late."
+                             if n else "Nothing was too late to enter.")
+                handled += 1
+            elif cmd in ("/help", "/start"):
+                send_message("<b>Commands</b>\n"
+                             "/pending — everything waiting, with a Drop button each\n"
+                             "/dropstale — drop the ones whose move already went")
+                handled += 1
+            continue
+
         cq = upd.get("callback_query")
         if not cq:
             continue
@@ -166,6 +255,23 @@ def poll_once(timeout=25):
         cb_id = cq.get("id")
         msg = cq.get("message", {})
         action, _, pid = payload.partition(":")
+
+        if action == "drop" and pid.isdigit():
+            info = paper_trading.get_pending(int(pid))
+            tag = (f"{info['coin']} {info['timeframe']}" if info else f"#{pid}")
+            dropped = paper_trading.reject_pending(int(pid))
+            _answer(cb_id, "Dropped ❌" if dropped else "already gone")
+            send_message(f"❌ Dropped <b>{tag}</b> — never entered.")
+            handled += 1
+            continue
+        if action == "dropstale":
+            n = _drop_stale()
+            _answer(cb_id, f"Dropped {n}")
+            send_message(f"🧹 Dropped {n} setup(s) that were too late."
+                         if n else "Nothing was too late to enter.")
+            handled += 1
+            continue
+
         if action not in ("appr", "skip") or not pid.isdigit():
             _answer(cb_id, "unrecognised")
             continue

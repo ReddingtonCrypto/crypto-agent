@@ -325,6 +325,21 @@ def expire_stale_pending(bars, frac=0.30):
     return gone
 
 
+def list_pending():
+    """Every setup still waiting for a decision, oldest first.
+
+    Column order matches what pending_progress() expects, so the Telegram list,
+    the dismiss tool and the automatic expiry all read a setup the same way.
+    """
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT id, coin, direction, entry, stop, tp1, tp2, timeframe, strategy, "
+        "opened_at FROM paper_trades WHERE status='PENDING' ORDER BY id"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
 def count_pending():
     """How many setups are sitting waiting for a tap right now."""
     conn = _conn()
