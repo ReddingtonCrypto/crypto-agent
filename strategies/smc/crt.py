@@ -582,3 +582,192 @@ def detect_crt_aligned(htf_df, ltf_df, kl_lookback=KL_LOOKBACK,
                                 "stop": stop, "target": target, "key_level": key}
         j += 1
     return None
+
+
+# ---------------------------------------------------------------------------
+# CRT v3 - the model the way it is actually taught and traded.
+#
+# detect_crt_scout above hunts a SWING PIVOT first and only then asks whether a
+# candle swept it. Measured over 36,253 candles that turned out to find a
+# different animal: 60% of its alerts are not a CRT at all, and it misses 97.9%
+# of the real ones. The ORDER is what was wrong - a CRT prints on ~38% of
+# candles, so the CRT is the easy part and the KEY LEVEL is the filter that
+# makes it rare. v3 puts them back in that order.
+# ---------------------------------------------------------------------------
+
+# Smallest stop per timeframe. One flat figure was wrong: a typical stop is
+# ~0.9% on 1h and ~1.2% on 4h but ~3% on 1d, so a flat 1.5% threw away three
+# quarters of hourly setups while barely touching daily.
+MIN_STOP_PCT = {"1w": 0.015, "1d": 0.015, "4h": 0.006, "1h": 0.0045}
+
+# Reward:risk floor per timeframe. 1h is noisier, so it has to pay more.
+MIN_RR = {"1w": 1.0, "1d": 1.0, "4h": 1.0, "1h": 1.1}
+
+# On 1h only: the whole trade, booked out in full, must be worth more than this
+# in price movement. Half comes off at TP1 and half at TP2, so this is the
+# blended move — a 1h setup that can only ever pay 0.4% is not worth the risk.
+MIN_NET_PCT = {"1h": 1.0}
+
+MIN_C1_RANGE_MULT = 0.6      # C1 must be a real range, not a doji
+
+
+def _premium_discount(df, i, direction, lookback=60):
+    """Expensive or cheap inside the recent range? The group's rule is
+    'sells only at expensive prices, buys only at cheaper prices'."""
+    h = df["high"].to_numpy(); l = df["low"].to_numpy()
+    c = df["close"].to_numpy()
+    a = max(0, i - lookback)
+    hi, lo = float(h[a:i + 1].max()), float(l[a:i + 1].min())
+    if hi <= lo:
+        return True
+    eq = (hi + lo) / 2.0
+    return c[i] >= eq if direction == "SHORT" else c[i] <= eq
+
+
+def detect_crt_v3(df, tf="1d", c1_lookback=12, min_confluence=2,
+                  require_pd=False, swing_lb=3,
+                  min_stop_pct=None, min_rr=None, min_net_pct=None):
+    """A CRT on the LAST CLOSED candle. Returns a setup dict or None.
+
+    `min_confluence=0` gives the unfiltered feed — every real CRT, no key-level
+    requirement. That is the "no confirmation" stream for practising level
+    selection by eye.
+    """
+    if len(df) < max(c1_lookback + 30, 60):
+        return None
+    min_stop_pct = MIN_STOP_PCT.get(tf, 0.015) if min_stop_pct is None else min_stop_pct
+    min_rr = MIN_RR.get(tf, 1.0) if min_rr is None else min_rr
+    min_net_pct = MIN_NET_PCT.get(tf, 0.0) if min_net_pct is None else min_net_pct
+
+    h = df["high"].to_numpy(); l = df["low"].to_numpy()
+    o = df["open"].to_numpy(); c = df["close"].to_numpy()
+    i = len(df) - 1
+
+    a = max(0, i - 60)
+    ranges = sorted(float(h[k] - l[k]) for k in range(a, i))
+    med = ranges[len(ranges) // 2] if ranges else 0.0
+
+    found = None
+    for j in range(i - 1, max(i - c1_lookback, 0) - 1, -1):
+        c1_hi, c1_lo = float(h[j]), float(l[j])
+        if c1_hi - c1_lo < MIN_C1_RANGE_MULT * med:
+            continue
+        if h[i] > c1_hi and c1_lo <= c[i] <= c1_hi:
+            direction = "SHORT"
+        elif l[i] < c1_lo and c1_lo <= c[i] <= c1_hi:
+            direction = "LONG"
+        else:
+            continue
+        # First resolution only: if something between C1 and now already took
+        # that side, this is no longer news.
+        mid = df.iloc[j + 1:i]
+        if len(mid):
+            if direction == "SHORT" and mid["high"].max() > c1_hi:
+                continue
+            if direction == "LONG" and mid["low"].min() < c1_lo:
+                continue
+        found = (j, direction, c1_hi, c1_lo)
+        break
+    if not found:
+        return None
+    j, direction, c1_hi, c1_lo = found
+
+    if require_pd and not _premium_discount(df, i, direction):
+        return None
+
+    # The key level QUALIFIES the CRT — it is not the trigger.
+    highs, lows = find_swings(df, lookback=swing_lb)
+    conf, labels = key_levels.count_key_levels(df, i, direction,
+                                               swings=(highs, lows))
+    if conf < min_confluence:
+        return None
+
+    # Prices. Entry and stop keep the deployed treatment: entry nudged to the
+    # near side so a limit fills, stop pushed BEYOND the sweep candle's wick.
+    entry = _entry_easier_fill(float(c[i]), direction)
+    stop = _sl_beyond_wick(float(h[i]) if direction == "SHORT" else float(l[i]),
+                           direction)
+    risk = abs(entry - stop)
+    if risk <= 0 or entry <= 0 or risk / entry < min_stop_pct:
+        return None
+
+    # Targets from C1's BODY, not its wicks.
+    body_hi = max(float(o[j]), float(c[j]))
+    body_lo = min(float(o[j]), float(c[j]))
+    body_mid = (body_hi + body_lo) / 2.0
+    body_far = body_lo if direction == "SHORT" else body_hi
+
+    tp1 = _tp_inside_target(body_mid, direction)
+    tp2 = _tp_inside_target(body_far, direction)
+    ahead = (entry > tp1 > 0) if direction == "SHORT" else (tp1 > entry)
+    if not ahead:
+        return None
+    # TP2 behind TP1 would mean the body is thinner than the trade: run to TP1.
+    beyond = (tp2 < tp1) if direction == "SHORT" else (tp2 > tp1)
+    if not beyond:
+        tp2 = tp1
+
+    rr = abs(tp1 - entry) / risk
+    if rr < min_rr:
+        return None
+
+    # Booked out in full: half at TP1, half at TP2.
+    net_pct = (0.5 * abs(tp1 - entry) + 0.5 * abs(tp2 - entry)) / entry * 100.0
+    if net_pct < min_net_pct:
+        return None
+
+    return {
+        "direction": direction, "entry": float(entry), "stop": float(stop),
+        "tp1": float(tp1), "tp2": float(tp2), "rr": round(rr, 2),
+        "net_pct": round(net_pct, 2),
+        "stop_pct": round(risk / entry * 100, 2),
+        "tp1_pct": round(abs(tp1 - entry) / entry * 100, 2),
+        "tp2_pct": round(abs(tp2 - entry) / entry * 100, 2),
+        "c1_index": j, "c1_gap": i - j,
+        "crt_high": c1_hi, "crt_low": c1_lo,
+        "body_high": body_hi, "body_low": body_lo,
+        "confluence": conf, "key_level": " + ".join(labels) or "none",
+        "qualified": conf >= 1,
+        "signal_ts": int(df["timestamp"].iloc[i]),
+    }
+
+
+def ltf_confirms(ltf_df, direction, since_ts, lookahead=60):
+    """Did a lower timeframe confirm the HTF CRT? Optional — never blocks.
+
+    Follows the sources: the entry trigger is a liquidity sweep followed by a
+    DISPLACEMENT close through it — Romeo's "model #1" (the one candle that
+    took the old high/low, then price closes beyond that candle's body). We
+    look for that pattern on the LTF after the HTF candle closed.
+
+    Returns True / False, or None when there is no LTF data to judge with.
+    """
+    if ltf_df is None or len(ltf_df) < 20:
+        return None
+    ts = ltf_df["timestamp"].to_numpy()
+    start = int(ts.searchsorted(since_ts))
+    if start >= len(ltf_df) - 2:
+        return None
+    o = ltf_df["open"].to_numpy(); c = ltf_df["close"].to_numpy()
+    h = ltf_df["high"].to_numpy(); l = ltf_df["low"].to_numpy()
+    end = min(len(ltf_df), start + lookahead)
+
+    # Typical bar size, so "displacement" means genuinely bigger than normal.
+    win = [float(h[k] - l[k]) for k in range(max(0, start - 30), start)] or [0.0]
+    avg = sum(win) / len(win)
+
+    for k in range(start + 1, end):
+        prev_lo = min(float(o[k - 1]), float(c[k - 1]))
+        prev_hi = max(float(o[k - 1]), float(c[k - 1]))
+        body = abs(float(c[k]) - float(o[k]))
+        rng = float(h[k] - l[k]) or 1e-9
+        displaced = body >= 1.2 * avg and body / rng >= 0.5
+        if direction == "SHORT":
+            swept = h[k - 1] >= max(h[start:k].max(), h[k - 1])
+            if swept and c[k] < prev_lo and displaced:
+                return True
+        else:
+            swept = l[k - 1] <= min(l[start:k].min(), l[k - 1])
+            if swept and c[k] > prev_hi and displaced:
+                return True
+    return False

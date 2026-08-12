@@ -263,6 +263,77 @@ def approve_pending(pending_id, current_price=None):
     return d
 
 
+def pending_progress(row, price):
+    """How far a pending setup has already travelled, as a fraction of the WHOLE
+    trade — entry all the way to the final target. Returns (fraction, invalid).
+
+    Measured against TP2 rather than TP1 because the full move is what you are
+    being offered; a third of the total gone is a third of the reward gone.
+    """
+    _tid, _coin, direction, entry, stop, _tp1, tp2 = row[:7]
+    if not entry or tp2 is None or price is None:
+        return None, False
+    long_ = direction == "LONG"
+    invalid = (price <= stop) if long_ else (price >= stop)
+    span = abs(tp2 - entry)
+    if span <= 0:
+        return None, invalid
+    moved = (price - entry) if long_ else (entry - price)
+    return moved / span, invalid
+
+
+def expire_stale_pending(bars, frac=0.30):
+    """Retire PENDING setups whose move has already left without you.
+
+    A setup you haven't tapped yet is only worth taking while the trade is still
+    ahead of it. Once price has covered `frac` of the WHOLE move — entry to the
+    final target, both take-profits included — that share of the reward is gone
+    while the stop has not moved, so the setup is cancelled rather than left
+    sitting there going stale.
+
+    Also drops any setup already invalidated (price through the stop). Returns a
+    list of {coin, timeframe, strategy, reason} for logging.
+    `bars` is {coin: {high, low, price}}.
+    """
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT id, coin, direction, entry, stop, tp1, tp2, timeframe, strategy "
+        "FROM paper_trades WHERE status='PENDING'"
+    ).fetchall()
+    gone = []
+    for r in rows:
+        tid, coin, direction, entry, stop, tp1, tp2, timeframe, strategy = r
+        bar = bars.get(coin)
+        if bar is None:
+            continue
+        moved, invalid = pending_progress(r, bar.get("price"))
+        reason = None
+        if invalid:
+            reason = "invalidated"
+        elif moved is not None and moved >= frac:
+            reason = f"already ran {moved * 100:.0f}% of the move"
+        if reason:
+            conn.execute(
+                "UPDATE paper_trades SET status='CANCELLED', closed_at=? WHERE id=?",
+                (_now(), tid),
+            )
+            gone.append({"coin": coin, "timeframe": timeframe,
+                         "strategy": strategy, "reason": reason})
+    if gone:
+        conn.commit()
+    conn.close()
+    return gone
+
+
+def count_pending():
+    """How many setups are sitting waiting for a tap right now."""
+    conn = _conn()
+    n = conn.execute(
+        "SELECT COUNT(*) FROM paper_trades WHERE status='PENDING'").fetchone()[0]
+    conn.close()
+    return n
+
+
 def reject_pending(pending_id):
     """Human skipped a PENDING setup -> mark SKIPPED (never tracked). Returns True
     if a pending row was updated."""

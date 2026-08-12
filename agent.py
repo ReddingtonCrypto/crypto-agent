@@ -19,7 +19,8 @@ from strategies.smc.market_structure import detect_structure
 from strategies.smc.smc_features import analyze as smc_analyze
 from strategies.smc.ict_model import detect_ict, detect_ict_source, detect_mss
 from strategies.smc.crt import (
-    detect_crt_aligned, detect_crt_setup, detect_crt_enhanced, detect_crt_scout)
+    detect_crt_aligned, detect_crt_setup, detect_crt_enhanced, detect_crt_scout,
+    detect_crt_v3, ltf_confirms)
 import telegram_approve
 from strategies.smc import ote as ote_lib
 from strategies.smc.ote import detect_ote_live, htf_bias as ote_htf_bias
@@ -89,7 +90,11 @@ ENABLE_CRT = False
 # trade, and sends it to Telegram with Approve/Skip buttons. Approving flips it to
 # a tracked OPEN trade under the "CRT" strategy; skipping drops it. Button presses
 # are handled in real time by the separate telegram_approve listener service.
-ENABLE_CRT_SCOUT = True
+# SUPERSEDED 2026-08-12 by CRT v3 below. Measured over 36,253 candles, this
+# detector's alerts were 60% not-a-CRT and it missed 97.9% of the real ones —
+# it hunts a swing pivot first, which finds a different pattern. Turned off,
+# not deleted: its open trades keep being managed to their TP/SL as normal.
+ENABLE_CRT_SCOUT = False
 SCOUT_TFS = ["1w", "1d", "4h"]
 # Confluence gate: how many key levels (FVG / old high-low / rejection block) must
 # STACK for an alert. 1 = any single key level (~30% of candles — the widest
@@ -99,9 +104,46 @@ SCOUT_MIN_CONFLUENCE = 1
 # 1.0 = never propose a sub-1:1 trade.
 SCOUT_MIN_RR = 1.0
 SCOUT_STRATEGY = "CRT"
+# Smallest stop we will accept, PER TIMEFRAME. A stop closer than this to the
+# entry gets tagged by ordinary noise rather than by the trade being wrong.
+#
+# This used to be one flat 1.5% for every timeframe, which was a mistake: a
+# typical stop is ~0.9% on 1h and ~1.2% on 4h but ~3% on 1d, so the flat figure
+# threw away 3 of every 4 hourly setups and 2 of every 3 four-hour ones while
+# barely touching daily. Measured across 364 coin/timeframe frames.
+SCOUT_MIN_STOP_PCT = {"1w": 0.015, "1d": 0.015, "4h": 0.006, "1h": 0.0045}
+SCOUT_MIN_STOP_DEFAULT = 0.015
+
+# ---- CRT v3: the rebuilt detector ----------------------------------------
+# The scout above finds a swing pivot first and only then asks whether a candle
+# swept it. Over 36,253 candles that proved to be a different pattern: 60% of
+# its alerts are not a CRT at all and it misses 97.9% of the real ones. v3 puts
+# the order back the way it is taught — find the CRT, then let the key level
+# qualify it. Per-timeframe stops, R:R and (on 1h) a minimum payout live in
+# strategies/smc/crt.py so the detector and any backtest cannot disagree.
+ENABLE_CRT_V3 = True             # LIVE 2026-08-12 — replaced the scout below
+CRT_V3_TFS = ["1w", "1d", "4h", "1h"]
+CRT_V3_MIN_CONFLUENCE = 1        # 1 = any key level qualifies; >1 is flagged A+
+CRT_V3_STRATEGY = "CRT"
+
+# The practice feed: every real CRT on the higher timeframes with NO key-level
+# requirement, clearly labelled, so the level call is yours to make. Higher
+# volume by design (~33/day) — it is for training the eye, not for trading.
+ENABLE_CRT_RAW = True            # LIVE 2026-08-12 — practice feed, do not trade
+CRT_RAW_TFS = ["1w", "1d", "4h"]
+CRT_RAW_STRATEGY = "CRT raw"
+
+# How far a setup you haven't tapped yet may run before it is retired. At 0.30
+# a third of the move to the first target has already happened without you, so
+# the reward left no longer justifies the same stop.
+PENDING_EXPIRE_FRAC = 0.30
+
+# Which lower timeframe to check for confirmation of a higher-timeframe CRT.
+# Purely informational — it is reported on the alert and never blocks one.
+CRT_LTF = {"1w": "4h", "1d": "1h", "4h": "15m", "1h": "15m"}
 # Timeframe weight for resolving a same-coin LONG-vs-SHORT clash in one scan
 # (higher timeframe wins; confluence breaks ties).
-SCOUT_TF_WEIGHT = {"1w": 3, "1d": 2, "4h": 1}
+SCOUT_TF_WEIGHT = {"1w": 3, "1d": 2, "4h": 1, "1h": 0}
 
 # OTE / "Textbook Setup" (ICT-2022) — the SEPARATE 3rd strategy (distinct from
 # ICT and CRT). Sweep -> displacement+MSS -> retrace into the 0.705-0.786 OTE
@@ -557,23 +599,70 @@ def _plain(tag):
     return PLAIN_TERMS.get(tag, tag)
 
 
-def _scout_alert_text(coin, tf, s):
-    """Compact, scannable Telegram body for a CRT setup awaiting approval."""
+def _report_approval_feeds(scout_count, ict_scout_count):
+    """Print how many setups each approval feed proposed this scan.
+
+    Called from ONE place, above the 'no valid signals' early return, because
+    these feeds run in the coin loop and have nothing to do with the auto
+    strategies — reporting them after that return hid a working feed."""
+    if ENABLE_CRT_SCOUT or ENABLE_CRT_V3 or ENABLE_CRT_RAW:
+        waiting = paper_trading.count_pending()
+        print(f"CRT: {scout_count} new setup(s) sent for approval this scan"
+              f" — {waiting} awaiting your tap.")
+    if ENABLE_ICT_SCOUT:
+        print(f"ICT new: {ict_scout_count} new setup(s) sent for approval this scan.")
+
+
+def _pct_from(entry, price):
+    """Distance from entry as a signed percentage — so every level on the alert
+    says how far away it actually is, not just where it sits."""
+    if not entry:
+        return ""
+    return f"{(price - entry) / entry * 100:+.2f}%"
+
+
+def _scout_alert_text(coin, tf, s, unconfirmed=False, ltf=None):
+    """Compact, scannable Telegram body for a CRT setup awaiting approval.
+
+    Every price carries its distance from entry, because "TP2 62657" means
+    nothing on its own — "+1.75%" is the number you actually judge.
+    """
     risk = abs(s["entry"] - s["stop"])
-    rr = s.get("rr") or (abs(s["tp2"] - s["entry"]) / risk if risk else 0.0)
+    rr = s.get("rr") or (abs(s["tp1"] - s["entry"]) / risk if risk else 0.0)
     arrow = "🟢 LONG" if s["direction"] == "LONG" else "🔴 SHORT"
+    e = s["entry"]
+
     conf = s["confluence"]
-    conf_line = (f"⭐ <b>A+</b> · {conf} key levels: {s['key_level']}"
-                 if conf > 1 else f"🔑 1 key level: {s['key_level']}")
-    return (
-        f"📊 <b>CRT</b> · <b>{coin}</b> · {tf}  {arrow}\n"
-        f"<code>Entry {s['entry']:.6g}</code>\n"
-        f"<code>Stop  {s['stop']:.6g}</code>\n"
-        f"<code>TP1   {s['tp1']:.6g}</code>\n"
-        f"<code>TP2   {s['tp2']:.6g}</code>\n"
-        f"{conf_line}\n"
-        f"R:R ≈ {rr:.1f}"
-    )
+    if unconfirmed:
+        # A practice sighting rather than a graded setup — but it still gets the
+        # full plan. Without a stop and targets there is nothing to judge the
+        # level against, which is the whole point of practising on it.
+        swept = "high" if s["direction"] == "SHORT" else "low"
+        head = f"🕯 <b>CRT · no confirmation</b> · <b>{coin}</b> · {tf}  {arrow}"
+        note = (f"Swept the CRT {swept} ({s['crt_high']:.6g} / {s['crt_low']:.6g}) "
+                f"and closed back inside.\n"
+                f"⚠️ No key level checked — judge the level yourself")
+    else:
+        head = f"📊 <b>CRT</b> · <b>{coin}</b> · {tf}  {arrow}"
+        note = (f"⭐ <b>A+</b> · {conf} key levels: {s['key_level']}"
+                if conf > 1 else f"🔑 {conf} key level: {s['key_level']}")
+
+    lines = [
+        head,
+        f"<code>Entry {e:.6g}</code>",
+        f"<code>Stop  {s['stop']:.6g}  ({_pct_from(e, s['stop'])})</code>",
+        f"<code>TP1   {s['tp1']:.6g}  ({_pct_from(e, s['tp1'])})</code>",
+        f"<code>TP2   {s['tp2']:.6g}  ({_pct_from(e, s['tp2'])})</code>",
+        note,
+    ]
+    if s.get("net_pct") is not None:
+        lines.append(f"R:R ≈ {rr:.2f}  ·  booked out in full ≈ {s['net_pct']:.2f}%")
+    else:
+        lines.append(f"R:R ≈ {rr:.2f}")
+    if ltf is not None:
+        lines.append("✅ lower timeframe confirmed" if ltf
+                     else "⏳ no lower-timeframe confirmation yet")
+    return "\n".join(lines)
 
 
 def _ict_alert_text(coin, tf, s):
@@ -718,7 +807,8 @@ def run_agent():
                     if sdf is None:
                         continue
                     setup = detect_crt_scout(
-                        sdf, min_confluence=SCOUT_MIN_CONFLUENCE, min_rr=SCOUT_MIN_RR)
+                        sdf, min_confluence=SCOUT_MIN_CONFLUENCE, min_rr=SCOUT_MIN_RR,
+                        min_stop_pct=SCOUT_MIN_STOP_PCT.get(stf, SCOUT_MIN_STOP_DEFAULT))
                     if setup:
                         found.append((stf, setup))
                 except Exception as e:
@@ -746,6 +836,57 @@ def run_agent():
                             scout_count += 1
                     except Exception as e:
                         print(f"Error Scout {coin} {stf}: {type(e).__name__}: {e}")
+
+        # ----- CRT v3 pass: the CRT is the trigger, the key level qualifies it.
+        #  Two streams. The QUALIFIED one needs key levels stacked and is the
+        #  feed to trade from. The RAW one is every real CRT on the higher
+        #  timeframes with no level check, clearly labelled, for practising the
+        #  level call yourself. Both still need your approval. -----
+        for v_on, v_tfs, v_conf, v_strat, v_raw in (
+                (ENABLE_CRT_V3, CRT_V3_TFS, CRT_V3_MIN_CONFLUENCE,
+                 CRT_V3_STRATEGY, False),
+                (ENABLE_CRT_RAW, CRT_RAW_TFS, 0, CRT_RAW_STRATEGY, True)):
+            if not v_on:
+                continue
+            for vtf in v_tfs:
+                try:
+                    vdf = _closed_df(coin, vtf, per_tf)
+                    if vdf is None:
+                        continue
+                    setup = detect_crt_v3(vdf, tf=vtf, min_confluence=v_conf)
+                    if not setup:
+                        continue
+                    # The practice feed is for the CRTs that did NOT qualify.
+                    # Without this every A+ setup would arrive twice — once to
+                    # trade and once to practise on.
+                    if (v_raw and ENABLE_CRT_V3 and vtf in CRT_V3_TFS
+                            and setup["confluence"] >= CRT_V3_MIN_CONFLUENCE):
+                        continue
+                    # Lower-timeframe confirmation is only looked up once a
+                    # setup exists, so it costs nothing on a quiet scan.
+                    ltf = None
+                    ltf_tf = CRT_LTF.get(vtf)
+                    if ltf_tf:
+                        try:
+                            ltf = ltf_confirms(_closed_df(coin, ltf_tf, per_tf),
+                                               setup["direction"],
+                                               setup["signal_ts"])
+                        except Exception:
+                            ltf = None
+                    pid = paper_trading.create_pending(
+                        coin, setup["direction"], setup["entry"], setup["stop"],
+                        setup["tp1"], setup["tp2"], setup["confluence"], vtf,
+                        v_strat, signal_ts=setup["signal_ts"])
+                    if pid is None:
+                        continue                # already proposed this candle
+                    mid = telegram_approve.send_approval(
+                        pid, _scout_alert_text(coin, vtf, setup,
+                                               unconfirmed=v_raw, ltf=ltf))
+                    if mid:
+                        paper_trading.set_alert_msg(pid, mid)
+                        scout_count += 1
+                except Exception as e:
+                    print(f"Error CRTv3 {coin} {vtf}: {type(e).__name__}: {e}")
 
         # ----- "ICT new" pass: the source-faithful 2022 model, proposed for HUMAN
         #  approval like CRT. Entry is a LIMIT at the fair value gap, so approving
@@ -840,6 +981,13 @@ def run_agent():
     if not bar_map:
         print("No data collected")
         return
+
+    # 0) Retire un-tapped setups whose move has already gone without them, so a
+    #    stale proposal can never be approved into a trade that has half
+    #    happened. Runs before anything else touches the book.
+    for g in paper_trading.expire_stale_pending(bar_map, frac=PENDING_EXPIRE_FRAC):
+        print(f"Expired pending {g['strategy']} {g['coin']} {g['timeframe']}"
+              f" — {g['reason']}")
 
     # 1) Advance paper trades (partial-exit plan); ping Telegram for each event
     #    — a partial bank at TP1, or a full close (WIN/LOSS/EXPIRED).
@@ -979,6 +1127,11 @@ def run_agent():
         f"Win rate: {stats['win_rate']}% | Avg P&L: {stats['avg_pnl']}%\n"
     )
 
+    # Report the approval feeds BEFORE the early return below — they run in the
+    # coin loop and are independent of the auto-strategy signals, so hiding
+    # their counts on a quiet scan made a working feed look dead.
+    _report_approval_feeds(scout_count, ict_scout_count)
+
     if not qualified:
         print("No valid signals found")
         return
@@ -1115,11 +1268,6 @@ Price: {best['price']}
         print(message)
     else:
         print("No new positions this scan - nothing to alert (dedup working).")
-
-    if ENABLE_CRT_SCOUT:
-        print(f"CRT: {scout_count} new setup(s) sent for approval this scan.")
-    if ENABLE_ICT_SCOUT:
-        print(f"ICT new: {ict_scout_count} new setup(s) sent for approval this scan.")
 
 
 # Loop forever only when run directly (python agent.py) — e.g. as a 24/7

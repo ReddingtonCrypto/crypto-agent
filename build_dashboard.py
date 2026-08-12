@@ -69,6 +69,7 @@ tr:nth-child(even) td { background: #0e131a; }
 .win { color: #3fb950; font-weight: 700; }
 .loss { color: #f85149; font-weight: 700; }
 .empty { color: #8b949e; font-style: italic; padding: 10px 0; }
+.note { color: #8b949e; font-size: 13px; line-height: 1.5; margin: -4px 0 10px; }
 .pill { display:inline-block; padding:1px 7px; border-radius:20px; font-size:11px; font-weight:700; }
 .pill.ok { background:#132b1a; color:#3fb950; }
 .pill.bad { background:#2b1414; color:#f85149; }
@@ -405,7 +406,14 @@ def build():
             "<th>Created (UTC)</th></tr>"
             f"{''.join(row(r) for r in rows)}</table>"
         )
-    pending_table = _pending_table(pending_t)
+    # Split them: a PENDING row is a suggestion nobody has agreed to, a WAITING
+    # row is one you approved that is still queued for its entry price. Showing
+    # both under one "waiting" heading made un-approved suggestions look like
+    # live orders.
+    awaiting_t = [r for r in pending_t if r["status"] == "PENDING"]
+    approved_t = [r for r in pending_t if r["status"] == "WAITING"]
+    awaiting_table = _pending_table(awaiting_t)
+    approved_table = _pending_table(approved_t)
 
     # Closed-trades table
     if closed_t:
@@ -503,11 +511,24 @@ def build():
         f"{sector_table}"
         "</div>"
 
-        # 4) Waiting (limit orders not yet filled) + pending approval — these need
-        # your attention first, so they sit above the trades already running.
+        # 4) Two separate panels, because they mean opposite things. The first is
+        # a list of suggestions nobody has agreed to and which will never trade
+        # unless you tap Approve; the second is trades you DID approve that are
+        # queued for their entry price.
         "<div class='panel'>"
-        f"<h2>⏳ Waiting / pending approval ({len(pending_t)})</h2>"
-        f"{pending_table}"
+        f"<h2>🔔 Awaiting your approval ({len(awaiting_t)})</h2>"
+        "<div class='note'>Suggestions only — none of these is a trade. "
+        "They do nothing unless you tap Approve in Telegram, and they are "
+        "retired automatically once the move has run 30% to the first target."
+        "</div>"
+        f"{awaiting_table}"
+        "</div>"
+
+        "<div class='panel'>"
+        f"<h2>⏳ Approved — waiting for entry ({len(approved_t)})</h2>"
+        "<div class='note'>You approved these. They become live trades only "
+        "when price reaches the entry.</div>"
+        f"{approved_table}"
         "</div>"
 
         # Then open trades — all on top, then longs | shorts side by side
