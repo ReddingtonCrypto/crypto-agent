@@ -153,8 +153,15 @@ def send_pending_list():
         mark = "⚠️ " if is_stale else ""
         lines.append(f"{mark}<code>#{tid}</code> {coin} {tf} {direction}"
                      f" · {strat} · {label}")
-        keyboard.append([{"text": f"❌ Drop #{tid} · {coin} {tf}",
-                          "callback_data": f"drop:{tid}"}])
+        # Approve and Drop sit side by side, so the list is a place to act from
+        # and not just to tidy up. "appl" rather than "appr" so the handler
+        # knows the press came from the list and leaves the other rows' buttons
+        # alone — clearing them would strip every setup at once.
+        keyboard.append([
+            {"text": f"✅ #{tid} {coin.split('/')[0]} {tf}",
+             "callback_data": f"appl:{tid}"},
+            {"text": "❌ Drop", "callback_data": f"drop:{tid}"},
+        ])
     if len(rows) > 20:
         lines.append(f"…and {len(rows) - 20} more")
     if stale:
@@ -243,7 +250,8 @@ def poll_once(timeout=25):
                 handled += 1
             elif cmd in ("/help", "/start"):
                 send_message("<b>Commands</b>\n"
-                             "/pending — everything waiting, with a Drop button each\n"
+                             "/pending — everything waiting, with Approve and "
+                             "Drop buttons on each\n"
                              "/dropstale — drop the ones whose move already went")
                 handled += 1
             continue
@@ -256,6 +264,22 @@ def poll_once(timeout=25):
         msg = cq.get("message", {})
         action, _, pid = payload.partition(":")
 
+        if action == "appl" and pid.isdigit():
+            # Approved from the /pending list. Thread the confirmation to the
+            # setup's ORIGINAL alert where we still have it, so this reads the
+            # same as approving from the alert itself, and leave the list's
+            # other buttons usable.
+            info = paper_trading.get_pending(int(pid))
+            _answer(cb_id, "Approving…" if info else "already gone")
+            try:
+                _handle("appr", int(pid),
+                        reply_to=(info or {}).get("alert_msg_id")
+                        or msg.get("message_id"))
+            except Exception as e:
+                print(f"handle appl #{pid} failed: {type(e).__name__}: {e}",
+                      flush=True)
+            handled += 1
+            continue
         if action == "drop" and pid.isdigit():
             info = paper_trading.get_pending(int(pid))
             tag = (f"{info['coin']} {info['timeframe']}" if info else f"#{pid}")
