@@ -122,7 +122,12 @@ SCOUT_MIN_STOP_DEFAULT = 0.015
 # qualify it. Per-timeframe stops, R:R and (on 1h) a minimum payout live in
 # strategies/smc/crt.py so the detector and any backtest cannot disagree.
 ENABLE_CRT_V3 = True             # LIVE 2026-08-12 — replaced the scout below
-CRT_V3_TFS = ["1w", "1d", "4h", "1h"]
+# 1h dropped 2026-08-13: it was the weakest timeframe in the backtest
+# (-0.34%/trade vs -0.15% on 4h) and 20 of its first 31 live setups expired
+# before they could be approved — an hourly move covers 30% of its range too
+# fast to review. The per-timeframe stop/RR settings for it are kept below so
+# it can be switched back on by adding it here.
+CRT_V3_TFS = ["1w", "1d", "4h"]
 CRT_V3_MIN_CONFLUENCE = 1        # 1 = any key level qualifies; >1 is flagged A+
 CRT_V3_STRATEGY = "CRT"
 
@@ -210,7 +215,11 @@ ENABLE_ICT = False
 # this forward test is judged on its own record.
 # CAVEAT worth remembering: the profit sits in the top ~10% of trades, so losing
 # streaks will feel worse than the average suggests.
-ENABLE_ICT_SCOUT = True
+# PARKED 2026-08-13 at the user's request, along with the legacy ICT rows,
+# which were deleted from the database so the scoreboard shows only CRT. The
+# detector and its settings are untouched — flip this back to True to resume
+# the forward test, and the backtest that justified it is in the memory notes.
+ENABLE_ICT_SCOUT = False
 ICT_SCOUT_TFS = ["4h", "1d"]     # 1w had only 12 historical setups — too few
 ICT_SCOUT_STRATEGY = "ICT new"
 # USABILITY gates, NOT edge improvements — be honest about this. Unfiltered
