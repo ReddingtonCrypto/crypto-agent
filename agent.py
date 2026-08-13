@@ -713,7 +713,8 @@ def _scout_alert_text(coin, tf, s, unconfirmed=False, ltf=None):
 CRT10_STATS = {
     "1w": "1w→4h backtest: +1.06%/trade, beats holding by +1.2%",
     "1d": "1d→1h backtest: +0.50%/trade, beats holding by +1.0%",
-    "1M": "⚠️ 1M→1d backtest: NEGATIVE (−3.9%/trade, 44 trades) — watch only",
+    "1M": "⚠️ 1M→1d backtest NEGATIVE but only 44 trades / 19 coins — and the "
+          "course's biggest example (PROM ~15R) is a monthly CRT. Unresolved.",
     "4h": "⚠️ 4h→15m backtest: NEGATIVE (−0.10%/trade) — watch only",
 }
 
