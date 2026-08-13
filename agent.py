@@ -668,6 +668,17 @@ def _scout_alert_text(coin, tf, s, unconfirmed=False, ltf=None):
         lines.append(f"R:R ≈ {rr:.2f}  ·  booked out in full ≈ {s['net_pct']:.2f}%")
     else:
         lines.append(f"R:R ≈ {rr:.2f}")
+    # Trend on THIS timeframe (his step one: "Daily is the trend"). Shown, never
+    # gated — the backtest could not prove the gate, and CRT stays alerts-only
+    # so the judgement is the user's.
+    trend = s.get("trend")
+    if trend:
+        if trend == "MIXED":
+            lines.append("📈 trend: no clear structure (he would skip this)")
+        else:
+            lines.append(f"📈 trend: {trend} — "
+                         + ("✅ with trend" if s.get("with_trend")
+                            else "⚠️ AGAINST trend (he would not trade it)"))
     if ltf is not None:
         lines.append("✅ lower timeframe confirmed" if ltf
                      else "⏳ no lower-timeframe confirmation yet")

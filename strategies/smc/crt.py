@@ -624,8 +624,29 @@ def _premium_discount(df, i, direction, lookback=60):
     return c[i] >= eq if direction == "SHORT" else c[i] <= eq
 
 
+def _trend_structure(df, i, swing_lb=3):
+    """Higher highs + higher lows, or lower highs + lower lows.
+
+    His definition, verbatim: "Trend is bullish. Market is making higher high...
+    higher low." [part4 @55:04]. Read on the CRT's OWN timeframe, not a higher
+    one -- "Daily is the trend. We have not taken any of the trends from the
+    weekly." [part4 @52:55]. Returns "BULLISH", "BEARISH" or "MIXED".
+    """
+    sub = df.iloc[: i + 1]
+    highs, lows = find_swings(sub, lookback=swing_lb)
+    if len(highs) < 2 or len(lows) < 2:
+        return "MIXED"
+    hh, hl = highs[-1][1] > highs[-2][1], lows[-1][1] > lows[-2][1]
+    lh, ll = highs[-1][1] < highs[-2][1], lows[-1][1] < lows[-2][1]
+    if hh and hl:
+        return "BULLISH"
+    if lh and ll:
+        return "BEARISH"
+    return "MIXED"
+
+
 def detect_crt_v3(df, tf="1d", c1_lookback=12, min_confluence=2,
-                  require_pd=False, swing_lb=3,
+                  require_pd=False, swing_lb=3, require_trend=False,
                   min_stop_pct=None, min_rr=None, min_net_pct=None):
     """A CRT on the LAST CLOSED candle. Returns a setup dict or None.
 
@@ -674,6 +695,15 @@ def detect_crt_v3(df, tf="1d", c1_lookback=12, min_confluence=2,
 
     if require_pd and not _premium_discount(df, i, direction):
         return None
+
+    # "Do you always trade with CRT against the trend? -- You will not trade."
+    # [part4 @50:38]. Step ONE of his process, ahead of the key level.
+    trend = _trend_structure(df, i, swing_lb)
+    if require_trend:
+        if direction == "LONG" and trend != "BULLISH":
+            return None
+        if direction == "SHORT" and trend != "BEARISH":
+            return None
 
     # The key level QUALIFIES the CRT — it is not the trigger.
     highs, lows = find_swings(df, lookback=swing_lb)
@@ -727,6 +757,8 @@ def detect_crt_v3(df, tf="1d", c1_lookback=12, min_confluence=2,
         "crt_high": c1_hi, "crt_low": c1_lo,
         "body_high": body_hi, "body_low": body_lo,
         "confluence": conf, "key_level": " + ".join(labels) or "none",
+        "trend": trend, "with_trend": (trend == "BULLISH") == (direction == "LONG")
+                                      and trend != "MIXED",
         "qualified": conf >= 1,
         "signal_ts": int(df["timestamp"].iloc[i]),
     }
