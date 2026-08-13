@@ -803,3 +803,148 @@ def ltf_confirms(ltf_df, direction, since_ts, lookahead=60):
             if swept and c[k] > prev_hi and displaced:
                 return True
     return False
+
+
+# --------------------------------------------------------------------------- #
+#  CRT 1.0 — the specification recovered from the user's own course videos.
+#  (research/crt-playlist/_RULES.md carries the rule-by-rule sources.)
+#
+#  The change that matters: the CRT and its key level are marked on the HIGHER
+#  timeframe, but the ENTRY happens on the aligned LOWER one --
+#      "Always make a rule... at least use the 2 time frame. Make the bias on
+#       the high time frame."                                  [part1 @47:24]
+#  Entering at the HTF candle close (what CIA did before) was measured at
+#  -0.546%/trade, t=-8.12 over 4,718 setups. Same setups, entered his way:
+#  +0.641%/trade better, t=+11.69.
+#
+#  Gates, each measured on 103 coins (daily->1h unless noted):
+#    R:R >= 2 .............. +0.148 -> +0.434%/tr   (his stated minimum)
+#    CISD within 4 candles . +0.434 -> +0.482%/tr   ("A+" timing)
+#    FVG tapped at C1 ...... +0.482 -> +0.498%/tr   (small but free)
+#  Final: +0.498%/tr, t=+5.50, both walk-forward halves +0.497/+0.498,
+#  profitable on 65 of 99 coins. Weekly->4h scores +1.055%/tr, t=+2.84.
+#
+#  REJECTED after testing, do not re-add: a trend gate (fails, and hurts the
+#  HTF entry), TBS over TWS (TBS -0.199 vs TWS +0.305 -- he is wrong on this),
+#  the series CISD (single beats it, as he says), and the literal reading of
+#  Model 2 (-0.342%).
+# --------------------------------------------------------------------------- #
+
+CRT10_PAIRS = {"1M": "1d", "1w": "4h", "1d": "1h", "4h": "15m"}
+CRT10_MIN_RR = 2.0            # his rulebook minimum; measured as the big lever
+CRT10_MAX_CISD_BARS = 4       # "within 3-4 candles of the sweep" = A+
+CRT10_LOOKAHEAD = 48          # LTF bars to wait for the CISD before giving up
+
+
+def _leg_fvg(df, k, j, direction):
+    """Did the reversal leg between the sweep and the CISD leave a gap?
+
+    A violent snap-back off the level leaves an imbalance; a hesitant one does
+    not. Used ONLY to flag A+ -- never to filter -- because this is our reading
+    of his Model 2, not his literal words. Measured +0.786%/tr on the subset.
+    """
+    h = df["high"].to_numpy(); l = df["low"].to_numpy()
+    for a in range(k, max(k + 1, j - 1)):
+        if a + 2 >= len(df):
+            break
+        if direction == "LONG" and h[a] < l[a + 2]:
+            return True
+        if direction == "SHORT" and l[a] > h[a + 2]:
+            return True
+    return False
+
+
+def crt10_entry(ltf_df, direction, since_ts, tp1,
+                lookahead=CRT10_LOOKAHEAD, level_lookback=30,
+                small_body_frac=0.35):
+    """His C3 entry, on the lower timeframe, after the HTF CRT candle closed.
+
+    sweep a recent LTF extreme -> the SINGLE candle that swept is the reference
+    -> a later candle must CLOSE beyond that candle's BODY (the CISD) -> enter
+    the RETEST of that level (the wick level when the body is a sliver, since a
+    sliver body rarely gets retested) -> stop just beyond the sweep wick.
+    """
+    if ltf_df is None or len(ltf_df) < 40:
+        return None
+    ts = ltf_df["timestamp"].to_numpy()
+    o = ltf_df["open"].to_numpy(); c = ltf_df["close"].to_numpy()
+    h = ltf_df["high"].to_numpy(); l = ltf_df["low"].to_numpy()
+
+    start = int(ts.searchsorted(since_ts, side="right"))
+    if start < 5 or start >= len(ltf_df) - 2:
+        return None
+    end = min(len(ltf_df) - 1, start + lookahead)
+
+    for k in range(start, end):
+        a = max(0, k - level_lookback)
+        if k <= a:
+            continue
+        if direction == "LONG":
+            prior = float(l[a:k].min())
+            if l[k] >= prior:
+                continue
+            line, wick = max(float(o[k]), float(c[k])), float(l[k])
+        else:
+            prior = float(h[a:k].max())
+            if h[k] <= prior:
+                continue
+            line, wick = min(float(o[k]), float(c[k])), float(h[k])
+        body = abs(float(c[k] - o[k])); rng = float(h[k] - l[k]) or 1e-9
+        for j in range(k + 1, min(end + 1, k + 12)):
+            broke = c[j] > line if direction == "LONG" else c[j] < line
+            if broke:
+                lvl = line if body / rng >= small_body_frac else (line + wick) / 2
+                ahead = lvl < tp1 if direction == "LONG" else lvl > tp1
+                if not ahead:
+                    break
+                return {"entry": float(lvl), "stop": float(wick),
+                        "bars": int(j - k), "sweep_i": int(k),
+                        "leg_fvg": _leg_fvg(ltf_df, k, j, direction)}
+            out = l[j] < wick if direction == "LONG" else h[j] > wick
+            if out:
+                break
+    return None
+
+
+def detect_crt_10(htf_df, ltf_df, tf, min_confluence=1,
+                  min_rr=CRT10_MIN_RR, max_cisd_bars=CRT10_MAX_CISD_BARS):
+    """CRT 1.0: HTF CRT at a key level, entered on the aligned LTF."""
+    s = detect_crt_v3(htf_df, tf=tf, min_confluence=min_confluence)
+    if not s:
+        return None
+    e = crt10_entry(ltf_df, s["direction"], s["signal_ts"], s["tp1"])
+    if not e:
+        return None
+    if e["bars"] > max_cisd_bars:
+        return None
+
+    # Rule 14: never trade the candle that FIRST taps the FVG -- the tap
+    # belongs to C1, and the sweep comes after it.
+    if "FVG" in s["key_level"]:
+        i = len(htf_df) - 1
+        if not key_levels.at_fvg(htf_df, s["c1_index"], s["direction"]):
+            return None
+
+    # Same real-world price treatment as the deployed detector: a limit that
+    # can actually fill, and a stop clear of round-number magnets.
+    entry = _entry_easier_fill(e["entry"], s["direction"])
+    stop = _sl_beyond_wick(e["stop"], s["direction"])
+    risk = abs(entry - stop)
+    if risk <= 0 or entry <= 0:
+        return None
+    rr = abs(s["tp1"] - entry) / risk
+    if rr < min_rr:
+        return None
+
+    s = dict(s)
+    s.update({
+        "entry": float(entry), "stop": float(stop), "rr": round(rr, 2),
+        "stop_pct": round(risk / entry * 100, 2),
+        "tp1_pct": round(abs(s["tp1"] - entry) / entry * 100, 2),
+        "tp2_pct": round(abs(s["tp2"] - entry) / entry * 100, 2),
+        "net_pct": round((0.5 * abs(s["tp1"] - entry)
+                          + 0.5 * abs(s["tp2"] - entry)) / entry * 100, 2),
+        "ltf": CRT10_PAIRS.get(tf), "cisd_bars": e["bars"],
+        "leg_fvg": e["leg_fvg"], "aplus": bool(e["leg_fvg"]),
+    })
+    return s
