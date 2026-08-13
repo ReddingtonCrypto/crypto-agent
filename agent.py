@@ -731,6 +731,10 @@ def _crt10_alert_text(coin, htf, s):
         f"<code>TP1   {s['tp1']:.6g}  ({_pct_from(e, s['tp1'])})</code>",
         f"<code>TP2   {s['tp2']:.6g}  ({_pct_from(e, s['tp2'])})</code>",
         f"🔑 {s['confluence']} key level: {s['key_level']}",
+        f"<code>CRT   {s['crt_low']:.6g} — {s['crt_high']:.6g}  ({htf} range)</code>",
+        f"<code>C1body {s['body_low']:.6g} — {s['body_high']:.6g}  (targets)</code>",
+        f"<code>Swept {s['swept']:.6g}  ({s['ltf']} liquidity taken)</code>",
+        f"<code>CISD  {s['cisd_line']:.6g}  (close beyond this = trigger)</code>",
         f"🕯 CISD {s['cisd_bars']} candle(s) after the sweep on {s['ltf']}",
         f"R:R ≈ {s['rr']:.2f}  ·  booked out in full ≈ {s['net_pct']:.2f}%",
     ]

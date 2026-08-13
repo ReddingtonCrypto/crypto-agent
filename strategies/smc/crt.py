@@ -905,6 +905,10 @@ def crt10_entry(ltf_df, direction, since_ts, tp1,
                 return {"entry": float(lvl), "stop": float(wick),
                         "bars": int(j - k), "sweep_i": int(k),
                         "trigger_i": int(j),
+                        # the actual liquidity taken, and the CISD line before
+                        # the odd-price nudge -- both needed to FIND this on a
+                        # chart, which is the whole point of an alert
+                        "swept": float(prior), "cisd_line": float(line),
                         "leg_fvg": _leg_fvg(ltf_df, k, j, direction)}
             out = l[j] < wick if direction == "LONG" else h[j] > wick
             if out:
@@ -970,6 +974,7 @@ def detect_crt_10(htf_df, ltf_df, tf, min_confluence=1,
         "net_pct": round((0.5 * abs(s["tp1"] - entry)
                           + 0.5 * abs(s["tp2"] - entry)) / entry * 100, 2),
         "ltf": CRT10_PAIRS.get(tf), "cisd_bars": e["bars"],
+        "swept": e["swept"], "cisd_line": e["cisd_line"],
         "leg_fvg": e["leg_fvg"], "aplus": bool(e["leg_fvg"]),
     })
     return s
