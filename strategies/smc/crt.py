@@ -834,6 +834,11 @@ CRT10_PAIRS = {"1M": "1d", "1w": "4h", "1d": "1h", "4h": "15m"}
 CRT10_MIN_RR = 2.0            # his rulebook minimum; measured as the big lever
 CRT10_MAX_CISD_BARS = 4       # "within 3-4 candles of the sweep" = A+
 CRT10_LOOKAHEAD = 48          # LTF bars to wait for the CISD before giving up
+CRT10_MAX_TRIGGER_AGE = 3     # the CISD must have printed within this many LTF
+                              # bars of NOW. Without it the detector happily
+                              # returns a two-day-old trigger whose retest has
+                              # already happened, and the setup is cancelled as
+                              # invalidated before the user can even tap it.
 
 
 def _leg_fvg(df, k, j, direction):
@@ -899,6 +904,7 @@ def crt10_entry(ltf_df, direction, since_ts, tp1,
                     break
                 return {"entry": float(lvl), "stop": float(wick),
                         "bars": int(j - k), "sweep_i": int(k),
+                        "trigger_i": int(j),
                         "leg_fvg": _leg_fvg(ltf_df, k, j, direction)}
             out = l[j] < wick if direction == "LONG" else h[j] > wick
             if out:
@@ -907,7 +913,8 @@ def crt10_entry(ltf_df, direction, since_ts, tp1,
 
 
 def detect_crt_10(htf_df, ltf_df, tf, min_confluence=1,
-                  min_rr=CRT10_MIN_RR, max_cisd_bars=CRT10_MAX_CISD_BARS):
+                  min_rr=CRT10_MIN_RR, max_cisd_bars=CRT10_MAX_CISD_BARS,
+                  max_trigger_age=CRT10_MAX_TRIGGER_AGE):
     """CRT 1.0: HTF CRT at a key level, entered on the aligned LTF."""
     s = detect_crt_v3(htf_df, tf=tf, min_confluence=min_confluence)
     if not s:
@@ -917,6 +924,24 @@ def detect_crt_10(htf_df, ltf_df, tf, min_confluence=1,
         return None
     if e["bars"] > max_cisd_bars:
         return None
+
+    # FRESHNESS. crt10_entry searches forward from the HTF close, which live
+    # means "up to now" -- so on a daily setup it can return a CISD from two
+    # days ago whose retest has already been and gone. Alerting on that wastes
+    # the user's attention and the setup is auto-cancelled minutes later.
+    # Only propose a CISD that has just printed.
+    age = (len(ltf_df) - 1) - e["trigger_i"]
+    if age > max_trigger_age:
+        return None
+
+    # And don't propose a trade the market has already killed: if price has
+    # traded through the stop since the trigger, it is dead on arrival.
+    after = ltf_df.iloc[e["trigger_i"] + 1:]
+    if len(after):
+        if s["direction"] == "LONG" and float(after["low"].min()) <= e["stop"]:
+            return None
+        if s["direction"] == "SHORT" and float(after["high"].max()) >= e["stop"]:
+            return None
 
     # Rule 14: never trade the candle that FIRST taps the FVG -- the tap
     # belongs to C1, and the sweep comes after it.
