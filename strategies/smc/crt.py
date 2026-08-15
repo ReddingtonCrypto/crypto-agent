@@ -949,7 +949,15 @@ def detect_crt_10(htf_df, ltf_df, tf, min_confluence=1,
                   min_rr=CRT10_MIN_RR, max_cisd_bars=CRT10_MAX_CISD_BARS,
                   max_trigger_age=CRT10_MAX_TRIGGER_AGE):
     """CRT 1.0: HTF CRT at a key level, entered on the aligned LTF."""
-    s = detect_crt_v3(htf_df, tf=tf, min_confluence=min_confluence)
+    # min_rr=0: detect_crt_v3 measures R:R from HTF geometry -- entry at the HTF
+    # close, stop at the far HTF sweep extreme (~3% on a daily). CRT 1.0 does
+    # not trade that. It enters on the LTF with a stop just beyond the 1h sweep
+    # wick, typically ~1%, so the HTF gate rejects setups whose real R:R is
+    # excellent, judged against a stop we never use. It is also redundant: the
+    # CRT10_MIN_RR check below applies R:R >= 2 to the geometry we DO trade.
+    # Measured against the user's own marked BTC CRTs: reproduction rises from
+    # 7/59 to 29/59. Cost on BTC over 900 daily bars: 23 -> 65 alerts.
+    s = detect_crt_v3(htf_df, tf=tf, min_confluence=min_confluence, min_rr=0)
     if not s:
         return None
     e = crt10_entry(ltf_df, s["direction"], s["signal_ts"], s["tp1"])
