@@ -283,6 +283,32 @@ def at_key_level(df, i, direction, types=("oldhl", "fvg", "rejblock", "ob", "eqh
     return None
 
 
+# The four the mentor names as his own, part1_foundations @1:24:19:
+# "personally, I use the old highs, old lows and FVG and rejection blocks. I use
+# the rejection blocks and FVG best." Order block he confirms IS a valid key
+# level (@1:23:09) but says he does not trade it; equal highs/lows and
+# displacement came from our ICT work, not from him.
+#
+# NOTHING is removed on the strength of this -- the others are kept and still
+# count toward confluence, because the mentor and the group do use them at
+# times. This only marks which is which, so the alerts teach the distinction
+# and so we can later measure whether the core levels behave differently.
+MENTOR_CORE = ("old high/low", "FVG", "rejection block")
+
+
+def describe_levels(labels):
+    """Render key-level labels, marking the mentor's own from the rest."""
+    core = [x for x in labels if x in MENTOR_CORE]
+    extra = [x for x in labels if x not in MENTOR_CORE]
+    if core and extra:
+        return f"{' + '.join(core)} (core) · {' + '.join(extra)} (secondary)"
+    if core:
+        return f"{' + '.join(core)} (core)"
+    if extra:
+        return f"{' + '.join(extra)} (secondary only)"
+    return "none"
+
+
 def count_key_levels(df, i, direction,
                      types=("oldhl", "fvg", "rejblock", "ob", "eqhl", "disp"), swings=None):
     """How many of the enabled key levels are present at once — the 'confluence'

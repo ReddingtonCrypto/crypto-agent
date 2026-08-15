@@ -23,6 +23,7 @@ from strategies.smc.crt import (
     detect_crt_v3, ltf_confirms, detect_crt_10, CRT10_PAIRS)
 import telegram_approve
 from strategies.smc import ote as ote_lib
+from strategies.smc import key_levels
 from strategies.smc.ote import detect_ote_live, htf_bias as ote_htf_bias
 
 # Apply the group's "instant CISD" quality filter to the LIVE detector: the
@@ -675,8 +676,8 @@ def _scout_alert_text(coin, tf, s, unconfirmed=False, ltf=None):
                 f"⚠️ No key level checked — judge the level yourself")
     else:
         head = f"📊 <b>CRT</b> · <b>{coin}</b> · {tf}  {arrow}"
-        note = (f"⭐ <b>A+</b> · {conf} key levels: {s['key_level']}"
-                if conf > 1 else f"🔑 {conf} key level: {s['key_level']}")
+        note = (f"⭐ <b>A+</b> · {conf} key levels: {_levels(s)}"
+                if conf > 1 else f"🔑 {conf} key level: {_levels(s)}")
 
     lines = [
         head,
@@ -731,7 +732,7 @@ def _crt10_alert_text(coin, htf, s):
         f"<code>Stop  {s['stop']:.6g}  ({_pct_from(e, s['stop'])})</code>",
         f"<code>TP1   {s['tp1']:.6g}  ({_pct_from(e, s['tp1'])})</code>",
         f"<code>TP2   {s['tp2']:.6g}  ({_pct_from(e, s['tp2'])})</code>",
-        f"🔑 {s['confluence']} key level: {s['key_level']}",
+        f"🔑 {s['confluence']} key level: {_levels(s)}",
         f"<code>CRT   {s['crt_low']:.6g} — {s['crt_high']:.6g}  ({htf} range)</code>",
         f"<code>C1body {s['body_low']:.6g} — {s['body_high']:.6g}  (targets)</code>",
         f"<code>Swept {s['swept']:.6g}  ({s['ltf']} liquidity taken)</code>",
@@ -748,6 +749,20 @@ def _crt10_alert_text(coin, htf, s):
                               else "  ⚠️ against trend")))
     lines.append(CRT10_STATS.get(htf, ""))
     return "\n".join(x for x in lines if x)
+
+
+def _levels(s):
+    """Name the key levels, marking the mentor's own four from the rest.
+
+    He states his list at part1_foundations @1:24:19 -- old highs, old lows,
+    FVG, rejection blocks -- and rates rejection block and FVG highest. Order
+    block he confirms IS valid but does not trade; equal h/l and displacement
+    are ours, from the ICT work. Nothing is dropped, because he and the group
+    do use the others at times; this only labels which is which, so the alerts
+    teach the difference as they arrive.
+    """
+    return key_levels.describe_levels(
+        [x.strip() for x in s.get("key_level", "").split("+") if x.strip()])
 
 
 def _ict_alert_text(coin, tf, s):
