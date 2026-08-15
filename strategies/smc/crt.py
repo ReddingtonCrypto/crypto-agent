@@ -668,7 +668,12 @@ def detect_crt_v3(df, tf="1d", c1_lookback=12, min_confluence=2,
     ranges = sorted(float(h[k] - l[k]) for k in range(a, i))
     med = ranges[len(ranges) // 2] if ranges else 0.0
 
-    found = None
+    # ONE CANDLE CAN BE C2 TO SEVERAL DIFFERENT C1s -- the user's "CRT within
+    # CRT". This used to take the nearest match and `break`; if that candidate
+    # then failed a gate below (confluence, min stop, R:R) the whole detector
+    # returned None and never looked at the valid ranges further back. Collect
+    # every candidate, nearest first, and try each until one passes.
+    candidates = []
     for j in range(i - 1, max(i - c1_lookback, 0) - 1, -1):
         c1_hi, c1_lo = float(h[j]), float(l[j])
         if c1_hi - c1_lo < MIN_C1_RANGE_MULT * med:
@@ -687,11 +692,25 @@ def detect_crt_v3(df, tf="1d", c1_lookback=12, min_confluence=2,
                 continue
             if direction == "LONG" and mid["low"].min() < c1_lo:
                 continue
-        found = (j, direction, c1_hi, c1_lo)
-        break
-    if not found:
+        candidates.append((j, direction, c1_hi, c1_lo))
+    if not candidates:
         return None
-    j, direction, c1_hi, c1_lo = found
+
+    for cand in candidates:
+        s = _build_crt_v3(df, i, cand, med, swing_lb, require_pd, require_trend,
+                          min_confluence, min_stop_pct, min_rr, min_net_pct)
+        if s is not None:
+            s["nested"] = len(candidates) > 1
+            return s
+    return None
+
+
+def _build_crt_v3(df, i, cand, med, swing_lb, require_pd, require_trend,
+                  min_confluence, min_stop_pct, min_rr, min_net_pct):
+    """Apply every gate to ONE C1 candidate. Returns the setup dict or None."""
+    h = df["high"].to_numpy(); l = df["low"].to_numpy()
+    o = df["open"].to_numpy(); c = df["close"].to_numpy()
+    j, direction, c1_hi, c1_lo = cand
 
     if require_pd and not _premium_discount(df, i, direction):
         return None
