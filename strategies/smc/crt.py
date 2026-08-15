@@ -852,7 +852,17 @@ def ltf_confirms(ltf_df, direction, since_ts, lookahead=60):
 CRT10_PAIRS = {"1M": "1d", "1w": "4h", "1d": "1h", "4h": "15m"}
 CRT10_MIN_RR = 2.0            # his rulebook minimum; measured as the big lever
 CRT10_MAX_CISD_BARS = 4       # "within 3-4 candles of the sweep" = A+
-CRT10_LOOKAHEAD = 48          # LTF bars to wait for the CISD before giving up
+CRT10_LOOKAHEAD = 120         # LTF bars to wait for the CISD before giving up.
+                              # Was 48 (2 days on a 1h entry chart), which quietly
+                              # dropped setups whose confirmation simply took
+                              # longer to print. Measured against the user's own
+                              # marked CRTs: the "no LTF CISD" misses fall from
+                              # 12 to 7 of 59, i.e. 5 of their confirmed setups
+                              # become visible. Volume cost, probed over 25 coins
+                              # of 1h data: ~31% more candidate triggers. Live
+                              # alert volume rises by less, because an HTF setup
+                              # must still exist and CRT10_MAX_TRIGGER_AGE still
+                              # only alerts a CISD in the 3 bars after it prints.
 CRT10_MAX_TRIGGER_AGE = 3     # the CISD must have printed within this many LTF
                               # bars of NOW. Without it the detector happily
                               # returns a two-day-old trigger whose retest has
