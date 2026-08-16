@@ -700,8 +700,7 @@ def _scout_alert_text(coin, tf, s, unconfirmed=False, ltf=None):
             lines.append("📈 trend: no clear structure (he would skip this)")
         else:
             lines.append(f"📈 trend: {trend} — "
-                         + ("✅ with trend" if s.get("with_trend")
-                            else "⚠️ AGAINST trend (he would not trade it)"))
+                         + _trend_note(s))
     if ltf is not None:
         lines.append("✅ lower timeframe confirmed" if ltf
                      else "⏳ no lower-timeframe confirmation yet")
@@ -743,12 +742,27 @@ def _crt10_alert_text(coin, htf, s):
     if s.get("leg_fvg"):
         lines.append("⚡ the reversal left an FVG — violent bounce (A+)")
     if s.get("trend"):
-        lines.append(f"📈 trend: {s['trend']}"
-                     + ("" if s["trend"] == "MIXED"
-                        else ("  ✅ with trend" if s.get("with_trend")
-                              else "  ⚠️ against trend")))
+        lines.append(f"📈 trend: {s['trend']}  {_trend_note(s)}")
     lines.append(CRT10_STATS.get(htf, ""))
     return "\n".join(x for x in lines if x)
+
+
+def _trend_note(s):
+    """His rule is three-way, not two: with trend, in range, or against it.
+
+    "we can only trade CRT if we get HTF reversal signs, or with trend, or in
+    range (after confirmation)" -- the user, reviewing their own charts. Range
+    is tradeable to them, so calling it "against trend" was wrong. Never
+    filters: they asked to be alerted either way and to judge it themselves.
+    """
+    t = s.get("trend")
+    if t == "RANGE":
+        return "↔️ RANGE (tradeable after confirmation)"
+    if s.get("with_trend"):
+        return "✅ with trend"
+    if t == "MIXED":
+        return "➖ no clear structure"
+    return "⚠️ AGAINST trend (he would not trade it)"
 
 
 def _levels(s):

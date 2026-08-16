@@ -624,6 +624,13 @@ def _premium_discount(df, i, direction, lookback=60):
     return c[i] >= eq if direction == "SHORT" else c[i] <= eq
 
 
+RANGE_TOL = 0.05   # two swing highs (and lows) within 5% = bounded, not trending.
+                   # Calibrated on BTC daily: 2% never fires, 5% labels ~16% of
+                   # bars RANGE and eats into MIXED rather than into BULL/BEAR,
+                   # which is what we want -- it should rescue the "no clear
+                   # structure" cases, not reclassify real trends.
+
+
 def _trend_structure(df, i, swing_lb=3):
     """Higher highs + higher lows, or lower highs + lower lows.
 
@@ -642,6 +649,17 @@ def _trend_structure(df, i, swing_lb=3):
         return "BULLISH"
     if lh and ll:
         return "BEARISH"
+    # RANGE: structure that is neither making higher highs+lows nor lower ones,
+    # AND the last two swing highs / two swing lows sit close together -- price
+    # is bounded rather than merely mixed. The user's rule is three-way, not
+    # two: "we can only trade CRT if we get HTF reversal signs, or WITH TREND,
+    # or IN RANGE (after confirmation)". A range is tradeable to them; a
+    # genuine counter-trend setup is not. MIXED stays for the leftover case
+    # where structure says nothing either way.
+    hi_gap = abs(highs[-1][1] - highs[-2][1]) / max(highs[-2][1], 1e-9)
+    lo_gap = abs(lows[-1][1] - lows[-2][1]) / max(lows[-2][1], 1e-9)
+    if hi_gap <= RANGE_TOL and lo_gap <= RANGE_TOL:
+        return "RANGE"
     return "MIXED"
 
 
