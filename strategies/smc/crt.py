@@ -710,6 +710,37 @@ def detect_crt_v3(df, tf="1d", c1_lookback=12, min_confluence=2,
                 continue
             if direction == "LONG" and mid["low"].min() < c1_lo:
                 continue
+
+            # THE OTHER SIDE MATTERS TOO -- two rules the user gave from their
+            # own charts, both verified against OHLC on the Oct 2021-Jan 2022
+            # review. Neither was checked before: we only ever looked at the
+            # side being swept.
+            c1_body_hi = max(float(o[j]), float(c[j]))
+            c1_body_lo = min(float(o[j]), float(c[j]))
+            mc = mid["close"].to_numpy()
+            mh = mid["high"].to_numpy(); ml = mid["low"].to_numpy()
+
+            # (A) A CLOSE beyond the OPPOSITE side of C1's BODY kills the CRT.
+            # "If the candle is closing beyond, it will be invalid -- all your
+            # CRT, all the concept will be invalid" [part1 @33:43]; the user
+            # refined it to the body: "27 Feb candle closes below the body of
+            # C1". Caught CIA firing on the Oct-18 setup four days after an
+            # Oct-19 close above the range, and on the Dec-21 setup after
+            # Dec 23 closed above it.
+            if direction == "SHORT" and (mc < c1_body_lo).any():
+                continue
+            if direction == "LONG" and (mc > c1_body_hi).any():
+                continue
+
+            # (B) Once C1 has RESOLVED one way it is spent -- do not take the
+            # opposite direction off it. Jan 2 2022 swept C1's high and closed
+            # back inside (a SHORT); CIA then fired a LONG off the same C1 on
+            # Jan 3. Later sweeps are legitimate -- taking the OTHER SIDE after
+            # one side has played out is not.
+            if direction == "LONG" and ((mh > c1_hi) & (mc <= c1_hi)).any():
+                continue
+            if direction == "SHORT" and ((ml < c1_lo) & (mc >= c1_lo)).any():
+                continue
         candidates.append((j, direction, c1_hi, c1_lo))
     if not candidates:
         return None
@@ -745,7 +776,7 @@ def _build_crt_v3(df, i, cand, med, swing_lb, require_pd, require_trend,
     # The key level QUALIFIES the CRT — it is not the trigger.
     highs, lows = find_swings(df, lookback=swing_lb)
     conf, labels = key_levels.count_key_levels(df, i, direction,
-                                               swings=(highs, lows))
+                                               swings=(highs, lows), c1_index=j)
     if conf < min_confluence:
         return None
 
@@ -797,6 +828,18 @@ def _build_crt_v3(df, i, cand, med, swing_lb, require_pd, require_trend,
         "trend": trend, "with_trend": (trend == "BULLISH") == (direction == "LONG")
                                       and trend != "MIXED",
         "qualified": conf >= 1,
+        # "Bonus: if there is also an FVG sitting right above the swept high
+        # (bearish) or right below the swept low (bullish), that stacks as
+        # extra confluence -- an even higher-probability (A+) setup."
+        "fvg_beside": bool(key_levels.fvg_beside_level(
+            df, i, direction, c1_hi if direction == "SHORT" else c1_lo)),
+        # FLAG, never a filter: the user asked to still be alerted when the
+        # sweep candle itself already covered the first target, so they can
+        # judge whether an LTF entry is still worth taking. "C2 CRT" is their
+        # single most common reason for passing on a setup.
+        "c2_delivered": bool(
+            (float(h[i]) >= body_mid) if direction == "LONG"
+            else (float(l[i]) <= body_mid)),
         "signal_ts": int(df["timestamp"].iloc[i]),
     }
 
@@ -868,7 +911,13 @@ def ltf_confirms(ltf_df, direction, since_ts, lookahead=60):
 # --------------------------------------------------------------------------- #
 
 CRT10_PAIRS = {"1M": "1d", "1w": "4h", "1d": "1h", "4h": "15m"}
-CRT10_MIN_RR = 2.0            # his rulebook minimum; measured as the big lever
+CRT10_MIN_RR = 1.0            # Was 2.0. Point-in-time on 103 coins with the
+                              # corrected stop: rr>=0 +0.637%/tr t=+5.36 breadth
+                              # 67/98 | rr>=1 +0.698 t=+5.82 breadth 63/98 |
+                              # rr>=2 +0.583 t=+5.18 breadth 60/98. The 2.0 gate
+                              # was the WORST of the three -- it cost trades,
+                              # breadth and return. Measured four separate ways
+                              # today; an R:R threshold has never helped.
 CRT10_MAX_CISD_BARS = 4       # "within 3-4 candles of the sweep" = A+
 CRT10_LOOKAHEAD = 120         # LTF bars to wait for the CISD before giving up.
                               # Was 48 (2 days on a 1h entry chart), which quietly
@@ -1012,7 +1061,26 @@ def detect_crt_10(htf_df, ltf_df, tf, min_confluence=1,
     # Same real-world price treatment as the deployed detector: a limit that
     # can actually fill, and a stop clear of round-number magnets.
     entry = _entry_easier_fill(e["entry"], s["direction"])
-    stop = _sl_beyond_wick(e["stop"], s["direction"])
+
+    # ⭐ THE STOP GOES AT THE HTF PROTECTED EXTREME, NOT THE LTF SWEEP WICK.
+    # `s["stop"]` is already C2's swept extreme with the odd-price nudge
+    # applied; `e["stop"]` was the 1h wick, typically ~1%, which sits inside the
+    # noise of the entry timeframe and is hit during a normal HTF-scale move.
+    #
+    # "Once the second candle closes inside the range, its own high becomes the
+    # protection line -- your stop-loss / invalidation marker... as long as C2's
+    # protected high/low is never broken, the target is still expected to
+    # eventually deliver." Also RIF, the one fully-drawn trade in the course
+    # (stop 0.0700 = one tick under the daily low 0.0701, 4.37%).
+    #
+    # Point-in-time, 103 coins, fills required, both walk-forward halves:
+    #   1d->1h   -0.078%/tr t=-0.76  ->  +0.659%/tr t=+5.36
+    #   1w->4h   -0.181%/tr t=-0.49  ->  +1.510%/tr t=+2.72
+    #   4h->15m  -0.355%/tr t=-6.96  ->  +0.125%/tr t=+2.43
+    # Survives removing the best coin, all three thirds of the sample
+    # independently, and 0.2%/side fees. Every pairing improves; the one that
+    # was reliably losing turns positive.
+    stop = s["stop"]
     risk = abs(entry - stop)
     if risk <= 0 or entry <= 0:
         return None

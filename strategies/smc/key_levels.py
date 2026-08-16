@@ -89,7 +89,13 @@ def at_fvg(df, i, direction, lookback=15):
     fully traded back through the gap between when it formed and bar i.
     Returns {top, bottom} or None."""
     h = df["high"].to_numpy(); l = df["low"].to_numpy()
-    setup_extreme = l[i] if direction == "LONG" else h[i]
+    # THE CANDLE MUST *TAP* THE GAP -- its RANGE has to reach into the zone.
+    # Testing only the candle's extreme (the old behaviour) missed the case
+    # where the range straddles the gap entirely, which is the commonest way a
+    # big candle interacts with one. Verified on BTC 2021-11-16: C1's range
+    # spanned the 61,560-63,274 gap the user had marked, and we returned None
+    # because its low sat below the zone.
+    lo_i, hi_i = float(l[i]), float(h[i])
     start = max(2, i - lookback)
     for k in range(i, start - 1, -1):
         a = k - 2
@@ -98,13 +104,57 @@ def at_fvg(df, i, direction, lookback=15):
         if direction == "LONG" and h[a] < l[k]:                 # bullish FVG
             bottom, top = float(h[a]), float(l[k])
             filled = l[k + 1:i].min() <= bottom if i > k + 1 else False
-            if not filled and bottom <= setup_extreme <= top * 1.001:
+            if not filled and not _tapped_before(h, l, k, i, bottom, top)                     and not (hi_i < bottom or lo_i > top):
                 return {"bottom": bottom, "top": top}
         if direction == "SHORT" and l[a] > h[k]:                # bearish FVG
             bottom, top = float(h[k]), float(l[a])
             filled = h[k + 1:i].max() >= top if i > k + 1 else False
-            if not filled and bottom * 0.999 <= setup_extreme <= top:
+            if not filled and not _tapped_before(h, l, k, i, bottom, top)                     and not (hi_i < bottom or lo_i > top):
                 return {"bottom": bottom, "top": top}
+    return None
+
+
+def _tapped_before(h, l, k, i, bottom, top):
+    """Has anything already reached into this gap before bar i?
+
+    "Once an FVG is tapped, it is USED UP -- don't use the same FVG as a key
+    level twice." Our old test was only whether the gap had been FILLED (traded
+    fully through). A gap that price dipped into and respected is still
+    unfilled, but it is spent: the imbalance has been rebalanced once and it is
+    no longer virgin. Bar i must therefore be the FIRST touch.
+    """
+    for m in range(k + 1, i):
+        if not (h[m] < bottom or l[m] > top):
+            return True
+    return False
+
+
+def fvg_beside_level(df, i, direction, level, lookback=15, gap_pct=0.02):
+    """An unfilled FVG sitting just BEYOND the swept level -- the A+ stack.
+
+    "Bonus: if there's also an FVG sitting right above the swept high (bearish)
+    or right below the swept low (bullish), that stacks as extra confluence."
+    This is ADJACENCY, not containment: the gap sits past the level, in the
+    direction price just came from, so the reversal has an imbalance to run
+    into. Distinct from at_fvg, which asks whether the candle TAPS a gap.
+    """
+    h = df["high"].to_numpy(); l = df["low"].to_numpy()
+    start = max(2, i - lookback)
+    span = abs(level) * gap_pct
+    for k in range(i, start - 1, -1):
+        a = k - 2
+        if a < 0:
+            break
+        if h[a] < l[k]:
+            bottom, top = float(h[a]), float(l[k])
+        elif l[a] > h[k]:
+            bottom, top = float(h[k]), float(l[a])
+        else:
+            continue
+        if direction == "SHORT" and level < bottom <= level + span:
+            return {"bottom": bottom, "top": top}
+        if direction == "LONG" and level - span <= top < level:
+            return {"bottom": bottom, "top": top}
     return None
 
 
@@ -310,14 +360,22 @@ def describe_levels(labels):
 
 
 def count_key_levels(df, i, direction,
-                     types=("oldhl", "fvg", "rejblock", "ob", "eqhl", "disp"), swings=None):
+                     types=("oldhl", "fvg", "rejblock", "ob", "eqhl", "disp"),
+                     swings=None, c1_index=None):
     """How many of the enabled key levels are present at once — the 'confluence'
     that separates an A+ setup (several stacking) from a marginal one (just one).
     Returns (count, labels)."""
     labels = []
     if "oldhl" in types and at_old_high_low(df, i, direction, swings=swings):
         labels.append("old high/low")
-    if "fvg" in types and at_fvg(df, i, direction):
+    # The FVG belongs to C1, not to the sweep candle: "the first candle will
+    # tap the fair value gap -- so this is our CRT candle. Now we wait for the
+    # second candle... sweep it high or low, and close it in the range"
+    # [part1_foundations @36:48-37:07]. detect_crt_10 already checked C1; the
+    # LABEL was still being computed on the sweep bar, so alerts disagreed with
+    # the rule and with the user's own reading.
+    if "fvg" in types and at_fvg(df, i if c1_index is None else c1_index,
+                                 direction):
         labels.append("FVG")
     if "rejblock" in types and at_rejection_block(df, i, direction, swings=swings):
         labels.append("rejection block")
