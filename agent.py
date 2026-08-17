@@ -964,7 +964,16 @@ def run_agent():
                         continue
                     # The LTF pull only happens once an HTF CRT exists, so quiet
                     # scans cost nothing extra.
-                    if detect_crt_v3(hdf, tf=htf,
+                    # min_rr=0 MUST match what detect_crt_10 does internally.
+                    # Without it this cheap pre-check re-applies the HTF R:R
+                    # gate that was removed in 141db6f -- measured as keeping
+                    # only 17% of the user's own marked setups, because it
+                    # scores entry-at-the-HTF-close against the far HTF stop,
+                    # geometry we never trade. It was silently killing setups
+                    # before detect_crt_10 ever ran (found by tracing ICP 4h and
+                    # ARB 4h, which both passed every real gate but never
+                    # alerted).
+                    if detect_crt_v3(hdf, tf=htf, min_rr=0,
                                      min_confluence=CRT_10_MIN_CONFLUENCE) is None:
                         continue
                     ldf = _closed_df(coin, ltf_tf, per_tf)
