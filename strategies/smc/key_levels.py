@@ -56,27 +56,66 @@ def _swings(df, i, swing_lb, swings):
     return find_swings(df.iloc[:i + 1], lookback=swing_lb)
 
 
-def at_old_high_low(df, i, direction, lookback=40, swing_lb=2, swings=None):
+# How far the swept level may sit from the wick that swept it, as a multiple of
+# the recent MEDIAN CANDLE RANGE. A multiple, not a fixed percentage, because a
+# weekly candle is several times the size of a daily one — the same per-
+# timeframe mistake already made twice, with the CISD window and the trigger
+# age. Measured on the Round 2 window: a flat 5% cost two of the user's own
+# marked setups (recall 6/7 -> 4/7) while 1.0x median range keeps all of them
+# AND removes more junk. See at_old_high_low.
+OLDHL_MAX_GAP_MULT = 1.0
+
+
+def at_old_high_low(df, i, direction, lookback=40, swing_lb=2, swings=None,
+                    max_gap_mult=OLDHL_MAX_GAP_MULT, c1_index=None):
     """The setup swept a genuine prior SWING high (short) / low (long) — an old
     level real traders watch — not just any recent candle. Returns
-    {level, type} (TWS/TBS) or None."""
+    {level, type} (TWS/TBS) or None.
+
+    TWO THINGS THIS USED TO GET WRONG, both found in the Round 2 chart review
+    (research/crt-manual/_LABELS.md):
+
+    1. NO PROXIMITY CHECK. It took the nearest surviving swing level on the far
+       side of the wick and called it swept, however far away that was. On BTC
+       it reported the 1 May 2022 low of 37,386 as "the old low taken" on SEVEN
+       consecutive setups over six weeks while price fell to 26,700 — the last
+       of them naming a level 38% away. A level the candle never went near is
+       not a level the candle swept. `max_gap_mult` is the same idea as
+       `crt10_entry`'s `max_level_gap`, one layer up.
+
+    2. C1's OWN EXTREME COUNTED AS AN "OLD" LEVEL. On a CRT the sweep IS of
+       C1's high/low, so returning that as the qualifying old level is circular
+       — every CRT would qualify itself. Pass `c1_index` to exclude it.
+
+    Base rate on BTC daily before: 51.9% of all bar-directions, i.e. noise.
+    """
     h = df["high"].to_numpy(); l = df["low"].to_numpy()
     o = df["open"].to_numpy(); c = df["close"].to_numpy()
     highs, lows = _swings(df, i, swing_lb, swings)
-    if direction == "SHORT":
-        cands = [p for (idx, p) in highs if idx <= i - swing_lb and idx >= i - lookback and p < h[i]]
-        if not cands:
-            return None
-        lvl = max(cands)                              # nearest old swing high the wick took out
-        typ = "TBS" if max(o[i], c[i]) > lvl else "TWS"
-        return {"level": float(lvl), "type": typ}
-    else:
-        cands = [p for (idx, p) in lows if idx <= i - swing_lb and idx >= i - lookback and p > l[i]]
-        if not cands:
-            return None
-        lvl = min(cands)
-        typ = "TBS" if min(o[i], c[i]) < lvl else "TWS"
-        return {"level": float(lvl), "type": typ}
+    short = direction == "SHORT"
+    wick = float(h[i]) if short else float(l[i])
+    if wick <= 0:
+        return None
+
+    # "near" in units of this timeframe's own candles, not a fixed %.
+    a = max(0, i - 20)
+    if i <= a:
+        return None
+    ranges = sorted(float(h[k] - l[k]) for k in range(a, i))
+    near = max_gap_mult * ranges[len(ranges) // 2]
+
+    src = highs if short else lows
+    cands = [p for (idx, p) in src
+             if i - lookback <= idx <= i - swing_lb
+             and idx != c1_index
+             and (p < h[i] if short else p > l[i])
+             and abs(p - wick) <= near]
+    if not cands:
+        return None
+    lvl = max(cands) if short else min(cands)     # the nearest one the wick took
+    typ = ("TBS" if (max(o[i], c[i]) > lvl if short else min(o[i], c[i]) < lvl)
+           else "TWS")
+    return {"level": float(lvl), "type": typ}
 
 
 # --------------------------------------------------------------------------- #
@@ -366,7 +405,8 @@ def count_key_levels(df, i, direction,
     that separates an A+ setup (several stacking) from a marginal one (just one).
     Returns (count, labels)."""
     labels = []
-    if "oldhl" in types and at_old_high_low(df, i, direction, swings=swings):
+    if "oldhl" in types and at_old_high_low(df, i, direction, swings=swings,
+                                            c1_index=c1_index):
         labels.append("old high/low")
     # The FVG belongs to C1, not to the sweep candle: "the first candle will
     # tap the fair value gap -- so this is our CRT candle. Now we wait for the
