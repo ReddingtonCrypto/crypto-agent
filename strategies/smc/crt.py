@@ -918,7 +918,18 @@ CRT10_MIN_RR = 1.0            # Was 2.0. Point-in-time on 103 coins with the
                               # was the WORST of the three -- it cost trades,
                               # breadth and return. Measured four separate ways
                               # today; an R:R threshold has never helped.
-CRT10_MAX_CISD_BARS = 4       # "within 3-4 candles of the sweep" = A+
+CRT10_MAX_CISD_BARS = 11      # Was 4, from "within 3-4 candles of the sweep is
+                              # A+". That is a QUALITY label in the source, not
+                              # a validity rule, and 4 was validated on the
+                              # broken baseline. Re-measured on the corrected
+                              # stop + CISD line, 103 coins, point-in-time:
+                              #   1d  4/6/8/11 bars -> +0.975/+0.999/+0.977/+0.992
+                              #   1w  4/6/8/11 bars -> +1.658/+1.623/+1.748/+1.713
+                              # Return is FLAT across the range; trades rise 10%
+                              # on daily (764->843) and 13% on weekly (236->267),
+                              # breadth improves on both. Same quality, more
+                              # coverage -- so the cap is set to the full search
+                              # window and stops discarding slower confirmations.
 CRT10_LOOKAHEAD = 120         # LTF bars to wait for the CISD before giving up.
                               # Was 48 (2 days on a 1h entry chart), which quietly
                               # dropped setups whose confirmation simply took
@@ -930,7 +941,19 @@ CRT10_LOOKAHEAD = 120         # LTF bars to wait for the CISD before giving up.
                               # alert volume rises by less, because an HTF setup
                               # must still exist and CRT10_MAX_TRIGGER_AGE still
                               # only alerts a CISD in the 3 bars after it prints.
-CRT10_MAX_TRIGGER_AGE = 3     # the CISD must have printed within this many LTF
+CRT10_MAX_TRIGGER_AGE = 12    # Was 3. That was set when the stop sat at the LTF
+                              # sweep wick (~1%), where 4 of the first 10
+                              # proposals auto-cancelled as invalidated before
+                              # the user could tap them. The stop now sits at the
+                              # HTF protected extreme (1-4%), so a setup survives
+                              # far longer and a 6-12 bar old trigger is much less
+                              # likely to be dead on arrival. NOT backtestable --
+                              # a backtest sees every trigger the instant it forms,
+                              # so this cost only exists live. WATCH THE
+                              # AUTO-CANCEL RATE; that is the number that
+                              # justified 3, and the number that would justify
+                              # pulling this back.
+                              # (original note) the CISD must have printed within this many LTF
                               # bars of NOW. Without it the detector happily
                               # returns a two-day-old trigger whose retest has
                               # already happened, and the setup is cancelled as
