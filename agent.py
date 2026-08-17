@@ -160,6 +160,33 @@ CRT_10_TFS = ["1M", "1w", "1d", "4h"]     # analysis TFs; entry TF comes from
 CRT_10_MIN_CONFLUENCE = 1
 CRT_10_STRATEGY = "CRT 1.0"
 
+# ----- WEEKLY SWEEP FEED -----------------------------------------------------
+# On WEEKLY the LTF entry model is not merely strict, it is ANTI-SELECTIVE.
+# Measured over 11 coins, 2023-01 -> 2026-08, resolving every weekly CRT on the
+# HTF (enter C2's close, stop at C2's protected extreme, 12 weeks, same-bar tie
+# = loss):
+#
+#             n     TP2     TP1    STOP   same-bar
+#   4h entry   19   31.6%   10.5%  36.8%   21.1%
+#   NO entry  231   43.7%    8.7%  32.0%   15.2%
+#
+# The 231 setups the 4h gate discards resolve BETTER than the 19 it keeps, and
+# only 7.6% of weekly CRTs produce an entry at all. Two of the three blocking
+# gates are our own per-timeframe bugs (see crt10_entry's max_level_gap).
+#
+# So on weekly the CRT itself is sent and the entry is left to the user, who
+# asked for exactly this: "for weekly we just stop C2 scan and also entry as
+# well after C1 sweep, I can manually judge those and find best entry until we
+# solve this". Both streams, so the key-level call can be judged too:
+#   A1  a key level is present   ~12 alerts/week over a 93-coin universe
+#   A2  no key level             ~31 more
+# The close-back-inside requirement is KEPT (option "B", sweep only, was
+# measured at ~74/week and Test 22 showed unreclaimed sweeps are genuine
+# expansion, not CRTs).
+ENABLE_CRT_SWEEP = True
+CRT_SWEEP_TFS = ["1w"]
+CRT_SWEEP_STRATEGY = "CRT sweep (manual entry)"
+
 PENDING_EXPIRE_FRAC = 0.30
 
 # Which lower timeframe to check for confirmation of a higher-timeframe CRT.
@@ -748,6 +775,54 @@ def _crt10_alert_text(coin, htf, s):
     return "\n".join(x for x in lines if x)
 
 
+def _crt10_already_sent(coin, htf, s, per_tf):
+    """Did CRT 1.0 already alert on this same setup? If the LTF entry exists,
+    the richer alert has gone out and the sweep feed must stay quiet."""
+    if not ENABLE_CRT_10 or htf not in CRT_10_TFS:
+        return False
+    ltf_tf = CRT10_PAIRS.get(htf)
+    if not ltf_tf:
+        return False
+    try:
+        ldf = _closed_df(coin, ltf_tf, per_tf)
+        if ldf is None:
+            return False
+        e = detect_crt_10(_closed_df(coin, htf, per_tf), ldf, htf,
+                          min_confluence=CRT_10_MIN_CONFLUENCE)
+        return bool(e) and e["signal_ts"] == s["signal_ts"]
+    except Exception:
+        return False
+
+
+def _crt_sweep_alert_text(coin, htf, s):
+    """The weekly CRT with NO entry attached — the user places it by hand.
+
+    Deliberately shows the geometry and nothing else: the range, the body
+    targets, the level that was swept, and the two things they reject on. No
+    entry price, because our weekly entry model is the thing under repair.
+    """
+    arrow = "🔴 SHORT" if s["direction"] == "SHORT" else "🟢 LONG"
+    swept = s["crt_high"] if s["direction"] == "SHORT" else s["crt_low"]
+    tag = ("🔑 key level" if s["confluence"] else "⚪ NO key level")
+    lines = [
+        f"🌊 <b>CRT SWEEP</b> · <b>{coin}</b> · {htf}  {arrow}   {tag}",
+        "<i>no entry given — the weekly entry model is under repair. "
+        "Drop to 4h and place it yourself.</i>",
+        f"<code>CRT   {s['crt_low']:.6g} — {s['crt_high']:.6g}  ({htf} range)</code>",
+        f"<code>Swept {swept:.6g}  (C2 took this and closed back inside)</code>",
+        f"<code>C1body {s['body_low']:.6g} — {s['body_high']:.6g}  (targets)</code>",
+        f"<code>TP1   {s['tp1']:.6g}</code>",
+        f"<code>TP2   {s['tp2']:.6g}</code>",
+        f"<code>Stop  {s['stop']:.6g}  (C2's protected extreme)</code>",
+        f"🔑 {s['confluence']} key level: {_levels(s)}" if s["confluence"]
+        else "⚪ no key level found — your call",
+        _crt10_warnings(s),
+        f"📈 trend: {s['trend']}  {_trend_note(s)}",
+        "👀 watch for the DOUBLE SWEEP on 4h — sweep, then the sweep wick",
+    ]
+    return "\n".join(x for x in lines if x)
+
+
 def _crt10_warnings(s):
     """The two things the user rejects on, stated up front.
 
@@ -1022,6 +1097,34 @@ def run_agent():
                     crt10_count += 1
                 except Exception as e:
                     print(f"Error CRT1.0 {coin} {htf}: {type(e).__name__}: {e}")
+
+        # ----- WEEKLY SWEEP FEED: the CRT, no LTF entry, judged by hand. -----
+        if ENABLE_CRT_SWEEP:
+            for stf in CRT_SWEEP_TFS:
+                try:
+                    sdf = _closed_df(coin, stf, per_tf)
+                    if sdf is None:
+                        continue
+                    s = detect_crt_v3(sdf, tf=stf, min_rr=0, min_confluence=0)
+                    if not s:
+                        continue
+                    # Don't send the same setup twice: CRT 1.0 already alerted
+                    # on it if the LTF entry existed.
+                    if _crt10_already_sent(coin, stf, s, per_tf):
+                        continue
+                    pid = paper_trading.create_pending(
+                        coin, s["direction"], s["entry"], s["stop"],
+                        s["tp1"], s["tp2"], s["confluence"], stf,
+                        CRT_SWEEP_STRATEGY, signal_ts=s["signal_ts"])
+                    if pid is None:
+                        continue
+                    mid = telegram_approve.send_approval(
+                        pid, _crt_sweep_alert_text(coin, stf, s))
+                    if mid:
+                        paper_trading.set_alert_msg(pid, mid)
+                except Exception as e:
+                    print(f"Error CRTsweep {coin} {stf}: "
+                          f"{type(e).__name__}: {e}")
 
         # ----- CRT v3 pass: the CRT is the trigger, the key level qualifies it.
         #  Two streams. The QUALIFIED one needs key levels stacked and is the
