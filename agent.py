@@ -732,6 +732,7 @@ def _crt10_alert_text(coin, htf, s):
         f"<code>TP1   {s['tp1']:.6g}  ({_pct_from(e, s['tp1'])})</code>",
         f"<code>TP2   {s['tp2']:.6g}  ({_pct_from(e, s['tp2'])})</code>",
         f"🔑 {s['confluence']} key level: {_levels(s)}",
+        _crt10_warnings(s),
         f"<code>CRT   {s['crt_low']:.6g} — {s['crt_high']:.6g}  ({htf} range)</code>",
         f"<code>C1body {s['body_low']:.6g} — {s['body_high']:.6g}  (targets)</code>",
         f"<code>Swept {s['swept']:.6g}  ({s['ltf']} liquidity taken)</code>",
@@ -745,6 +746,31 @@ def _crt10_alert_text(coin, htf, s):
         lines.append(f"📈 trend: {s['trend']}  {_trend_note(s)}")
     lines.append(CRT10_STATS.get(htf, ""))
     return "\n".join(x for x in lines if x)
+
+
+def _crt10_warnings(s):
+    """The two things the user rejects on, stated up front.
+
+    Reviewing five live alerts they passed on four, and the reasons were always
+    one of these: the sweep candle had already delivered the first target ("C2
+    CRT" -- their most common rejection by far), or the trade was against the
+    timeframe's own trend. Both were already computed and neither was shown, so
+    they had to open a chart to find out. Never filters -- their standing
+    instruction is to see everything and judge it themselves.
+    """
+    out = []
+    if s.get("c2_delivered"):
+        out.append("⚠️ C2 already reached TP1 (little left to give)")
+    t = s.get("trend")
+    if t == "RANGE":
+        out.append("↔️ RANGE — tradeable after confirmation")
+    elif t == "MIXED":
+        out.append("➖ no clear trend structure")
+    elif not s.get("with_trend"):
+        out.append("⚠️ AGAINST the " + str(t).lower() + " trend")
+    if s.get("fvg_beside"):
+        out.append("⭐ A+ — FVG beside the swept level")
+    return "   ".join(out)
 
 
 def _trend_note(s):

@@ -946,7 +946,12 @@ CRT10_LOOKAHEAD = 120         # LTF bars to wait for the CISD before giving up.
                               # alert volume rises by less, because an HTF setup
                               # must still exist and CRT10_MAX_TRIGGER_AGE still
                               # only alerts a CISD in the 3 bars after it prints.
-CRT10_MAX_TRIGGER_AGE = 12    # Was 3. That was set when the stop sat at the LTF
+# How old the CISD may be, in LTF bars, and it MUST be per timeframe: 12 bars
+# is 12 hours on a 1d->1h setup (fine) but only 3 HOURS on 4h->15m, where the
+# stop is often under 1%. The user received an ICP 4h alert ~3h after its
+# trigger and rightly called it late. Same mistake I made with the CISD window.
+CRT10_MAX_TRIGGER_AGE_BY_TF = {"1M": 12, "1w": 12, "1d": 12, "4h": 3}
+CRT10_MAX_TRIGGER_AGE = 12    # default for callers that pass no timeframe. Was 3. That was set when the stop sat at the LTF
                               # sweep wick (~1%), where 4 of the first 10
                               # proposals auto-cancelled as invalidated before
                               # the user could tap them. The stop now sits at the
@@ -985,7 +990,7 @@ def _leg_fvg(df, k, j, direction):
 
 def crt10_entry(ltf_df, direction, since_ts, tp1,
                 lookahead=CRT10_LOOKAHEAD, level_lookback=30,
-                small_body_frac=0.35):
+                small_body_frac=0.35, htf_level=None, max_level_gap=0.02):
     """His C3 entry, on the lower timeframe, after the HTF CRT candle closed.
 
     sweep a recent LTF extreme -> the SINGLE candle that swept is the reference
@@ -1013,11 +1018,21 @@ def crt10_entry(ltf_df, direction, since_ts, tp1,
             if l[k] >= prior:
                 continue
             wick = float(l[k])
+            # THE SWEEP MUST BELONG TO THIS SETUP. Without this the search takes
+            # any recent LTF extreme, however far from the HTF level the CRT is
+            # built on. BEL/USDT 1d: C1 range 0.1029-0.1107, but the "sweep"
+            # came in at 0.1232 -- 11% above the C1 high -- producing an entry
+            # 10% above market with an 8.4% stop. It auto-cancelled, but it
+            # should never have been proposed.
+            if htf_level is not None and                     abs(wick - htf_level) / htf_level > max_level_gap:
+                continue
         else:
             prior = float(h[a:k].max())
             if h[k] <= prior:
                 continue
             wick = float(h[k])
+            if htf_level is not None and                     abs(wick - htf_level) / htf_level > max_level_gap:
+                continue
 
         # ⭐ THE CISD LINE COMES FROM THE START OF THE SWEEPING RUN, not from
         # the sweeping candle itself. "CISD is either a single candle or a
@@ -1063,7 +1078,7 @@ def crt10_entry(ltf_df, direction, since_ts, tp1,
 
 def detect_crt_10(htf_df, ltf_df, tf, min_confluence=1,
                   min_rr=CRT10_MIN_RR, max_cisd_bars=None,
-                  max_trigger_age=CRT10_MAX_TRIGGER_AGE):
+                  max_trigger_age=None):
     """CRT 1.0: HTF CRT at a key level, entered on the aligned LTF."""
     # min_rr=0: detect_crt_v3 measures R:R from HTF geometry -- entry at the HTF
     # close, stop at the far HTF sweep extreme (~3% on a daily). CRT 1.0 does
@@ -1075,10 +1090,16 @@ def detect_crt_10(htf_df, ltf_df, tf, min_confluence=1,
     # 7/59 to 29/59. Cost on BTC over 900 daily bars: 23 -> 65 alerts.
     if max_cisd_bars is None:
         max_cisd_bars = CRT10_MAX_CISD_BARS_BY_TF.get(tf, CRT10_MAX_CISD_BARS)
+    if max_trigger_age is None:
+        max_trigger_age = CRT10_MAX_TRIGGER_AGE_BY_TF.get(
+            tf, CRT10_MAX_TRIGGER_AGE)
     s = detect_crt_v3(htf_df, tf=tf, min_confluence=min_confluence, min_rr=0)
     if not s:
         return None
-    e = crt10_entry(ltf_df, s["direction"], s["signal_ts"], s["tp1"])
+    # the HTF extreme C2 actually swept -- the LTF sweep has to be near it
+    htf_level = s["crt_low"] if s["direction"] == "LONG" else s["crt_high"]
+    e = crt10_entry(ltf_df, s["direction"], s["signal_ts"], s["tp1"],
+                    htf_level=htf_level)
     if not e:
         return None
     if e["bars"] > max_cisd_bars:
