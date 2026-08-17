@@ -918,18 +918,23 @@ CRT10_MIN_RR = 1.0            # Was 2.0. Point-in-time on 103 coins with the
                               # was the WORST of the three -- it cost trades,
                               # breadth and return. Measured four separate ways
                               # today; an R:R threshold has never helped.
-CRT10_MAX_CISD_BARS = 11      # Was 4, from "within 3-4 candles of the sweep is
-                              # A+". That is a QUALITY label in the source, not
-                              # a validity rule, and 4 was validated on the
-                              # broken baseline. Re-measured on the corrected
-                              # stop + CISD line, 103 coins, point-in-time:
-                              #   1d  4/6/8/11 bars -> +0.975/+0.999/+0.977/+0.992
-                              #   1w  4/6/8/11 bars -> +1.658/+1.623/+1.748/+1.713
-                              # Return is FLAT across the range; trades rise 10%
-                              # on daily (764->843) and 13% on weekly (236->267),
-                              # breadth improves on both. Same quality, more
-                              # coverage -- so the cap is set to the full search
-                              # window and stops discarding slower confirmations.
+# How many LTF bars the CISD may take after the sweep. PER TIMEFRAME, because
+# the pairings genuinely disagree -- measured on 103 coins, point-in-time, on
+# the corrected stop and CISD line:
+#
+#   bars:        4        6        8       11
+#   1d->1h   +0.975   +0.999   +0.977   +0.992   -> FLAT, so take the coverage
+#   1w->4h   +1.658   +1.623   +1.748   +1.713   -> FLAT, so take the coverage
+#   4h->15m  +0.323      -     +0.252   +0.234   -> DEGRADES, keep it tight
+#
+# On 1d/1w the "within 3-4 candles" rule is an A+ quality label and nothing is
+# lost by allowing slower confirmations: trades rise 10-13% at the same return.
+# On 4h->15m it is a real constraint -- the entry timeframe is fast and tight,
+# so a confirmation 11 bars later (nearly 3 hours) is genuinely stale. t-stat
+# falls 4.29 -> 3.32 monotonically as the window widens.
+CRT10_MAX_CISD_BARS_BY_TF = {"1M": 11, "1w": 11, "1d": 11, "4h": 4}
+CRT10_MAX_CISD_BARS = 11      # default for callers that do not pass a timeframe
+
 CRT10_LOOKAHEAD = 120         # LTF bars to wait for the CISD before giving up.
                               # Was 48 (2 days on a 1h entry chart), which quietly
                               # dropped setups whose confirmation simply took
@@ -1057,7 +1062,7 @@ def crt10_entry(ltf_df, direction, since_ts, tp1,
 
 
 def detect_crt_10(htf_df, ltf_df, tf, min_confluence=1,
-                  min_rr=CRT10_MIN_RR, max_cisd_bars=CRT10_MAX_CISD_BARS,
+                  min_rr=CRT10_MIN_RR, max_cisd_bars=None,
                   max_trigger_age=CRT10_MAX_TRIGGER_AGE):
     """CRT 1.0: HTF CRT at a key level, entered on the aligned LTF."""
     # min_rr=0: detect_crt_v3 measures R:R from HTF geometry -- entry at the HTF
@@ -1068,6 +1073,8 @@ def detect_crt_10(htf_df, ltf_df, tf, min_confluence=1,
     # CRT10_MIN_RR check below applies R:R >= 2 to the geometry we DO trade.
     # Measured against the user's own marked BTC CRTs: reproduction rises from
     # 7/59 to 29/59. Cost on BTC over 900 daily bars: 23 -> 65 alerts.
+    if max_cisd_bars is None:
+        max_cisd_bars = CRT10_MAX_CISD_BARS_BY_TF.get(tf, CRT10_MAX_CISD_BARS)
     s = detect_crt_v3(htf_df, tf=tf, min_confluence=min_confluence, min_rr=0)
     if not s:
         return None
