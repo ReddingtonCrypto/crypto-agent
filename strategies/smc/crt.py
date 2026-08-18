@@ -988,9 +988,26 @@ def _leg_fvg(df, k, j, direction):
     return False
 
 
+# How far the LTF sweep may sit from the HTF level it is supposed to be
+# sweeping, as a MULTIPLE OF THE MEDIAN LTF CANDLE RANGE.
+#
+# This was a flat 2% and it was the fifth instance of the same mistake: one
+# number calibrated on BTC daily and applied to every pairing. Measured across
+# the 11 review coins, a flat 2% is simultaneously
+#     1d->1h    3.1x the median 1h candle   (generous — daily worked)
+#     1w->4h    1.1x the median 4h candle   (far too tight)
+#     4h->15m   8.7x the median 15m candle  (far too loose)
+# which is exactly why weekly produced almost no entries: 97 of the 231 weekly
+# setups with no entry were blocked by this one constant. 3.0 keeps the daily
+# behaviour it was tuned on and lets the other pairings scale to their own
+# candles.
+CRT10_LEVEL_GAP_MULT = 3.0
+
+
 def crt10_entry(ltf_df, direction, since_ts, tp1,
                 lookahead=CRT10_LOOKAHEAD, level_lookback=30,
-                small_body_frac=0.35, htf_level=None, max_level_gap=0.02):
+                small_body_frac=0.35, htf_level=None,
+                max_level_gap_mult=CRT10_LEVEL_GAP_MULT):
     """His C3 entry, on the lower timeframe, after the HTF CRT candle closed.
 
     sweep a recent LTF extreme -> the SINGLE candle that swept is the reference
@@ -1009,6 +1026,13 @@ def crt10_entry(ltf_df, direction, since_ts, tp1,
         return None
     end = min(len(ltf_df) - 1, start + lookahead)
 
+    # "near the HTF level" in units of THIS timeframe's own candles — see
+    # CRT10_LEVEL_GAP_MULT. Measured on the 40 bars before the search window,
+    # all of which are closed, so this stays point-in-time.
+    _a = max(0, start - 40)
+    _r = sorted(float(h[k] - l[k]) for k in range(_a, start))
+    max_level_gap = (max_level_gap_mult * _r[len(_r) // 2]) if _r else 0.0
+
     for k in range(start, end):
         a = max(0, k - level_lookback)
         if k <= a:
@@ -1024,14 +1048,14 @@ def crt10_entry(ltf_df, direction, since_ts, tp1,
             # came in at 0.1232 -- 11% above the C1 high -- producing an entry
             # 10% above market with an 8.4% stop. It auto-cancelled, but it
             # should never have been proposed.
-            if htf_level is not None and                     abs(wick - htf_level) / htf_level > max_level_gap:
+            if htf_level is not None and abs(wick - htf_level) > max_level_gap:
                 continue
         else:
             prior = float(h[a:k].max())
             if h[k] <= prior:
                 continue
             wick = float(h[k])
-            if htf_level is not None and                     abs(wick - htf_level) / htf_level > max_level_gap:
+            if htf_level is not None and abs(wick - htf_level) > max_level_gap:
                 continue
 
         # ⭐ THE CISD LINE COMES FROM THE START OF THE SWEEPING RUN, not from
