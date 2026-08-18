@@ -624,6 +624,26 @@ def _premium_discount(df, i, direction, lookback=60):
     return c[i] >= eq if direction == "SHORT" else c[i] <= eq
 
 
+# C2 must poke at least this fraction of C1's RANGE beyond it. A fraction, not
+# a percentage of price, so it would scale across timeframes on its own.
+#
+# ⚠️ MEASURED AND DISABLED (0.0). It reads as obviously right -- a one-tick poke
+# is not a liquidity grab -- and the user has rejected that shape five times.
+# But scored against their own 35 verdicts it removes their TAKEs at roughly
+# the same rate as their rejections:
+#
+#   floor   INVALID removed   SKIP removed   TAKE removed   CONDITIONAL removed
+#    2%          0/3              0/13           1/15            2/4
+#    3%          1/3              3/13           1/15            2/4
+#    5%          2/3              4/13           2/15            2/4
+#    8%          2/3              8/13           4/15            2/4
+#
+# At 5% that is 6 good removals against 4 bad ones on n=35 -- not a trade worth
+# making. Their "that's not even a sweep" judgement involves something beyond
+# depth. Left in place at 0.0 so it is one line to enable if more labels ever
+# separate it. DO NOT SHIP ON THE CORRECTNESS ARGUMENT ALONE.
+MIN_SWEEP_DEPTH = 0.0
+
 RANGE_TOL = 0.05   # two swing highs (and lows) within 5% = bounded, not trending.
                    # Calibrated on BTC daily: 2% never fires, 5% labels ~16% of
                    # bars RANGE and eats into MIXED rather than into BULL/BEAR,
@@ -701,6 +721,20 @@ def detect_crt_v3(df, tf="1d", c1_lookback=12, min_confluence=2,
         elif l[i] < c1_lo and c1_lo <= c[i] <= c1_hi:
             direction = "LONG"
         else:
+            continue
+
+        # THE SWEEP HAS TO BE A SWEEP. A one-tick poke beyond C1 at the end of
+        # a slow grind is not a liquidity grab, it is continuation making a new
+        # extreme -- and the user has rejected exactly that shape five separate
+        # times ("no logic of this", "that's not even a sweep"). Their calls sit
+        # in the shallow tail every time: SOL 3.2% and 3.7% of C1's range, ADA
+        # 2.4% on weekly, against a median of 15.9%.
+        #
+        # Expressed as a FRACTION OF C1's OWN RANGE, so it scales with the
+        # timeframe by construction rather than needing a per-TF table.
+        depth = ((c1_lo - float(l[i])) if direction == "LONG"
+                 else (float(h[i]) - c1_hi))
+        if (c1_hi - c1_lo) > 0 and depth / (c1_hi - c1_lo) < MIN_SWEEP_DEPTH:
             continue
         # First resolution only: if something between C1 and now already took
         # that side, this is no longer news.
