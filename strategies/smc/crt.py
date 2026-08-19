@@ -665,17 +665,21 @@ KL_SWING_LB = 3
 # user found a real FVG or rejection block on every one that CIA had qualified
 # using only an order block.
 #
-# ⚠️ NOT ENABLED YET, AND THE REASON MATTERS. Switched on, it loses 9 labelled
-# setups and FIVE of them are ones the user said TAKE — including SOL 1w
-# 2026-06-01 ("valid, still running, all good") and BNB 1d 2023-06-14, both
-# setups where THEY THEMSELVES named an FVG or a rejection block that our
-# detectors cannot find. So order block is currently standing in for levels we
-# fail to detect, and removing it just removes the setup.
+# ENABLED 2026-08-19 on the user's instruction: "just follow the rules."
 #
-# ⇒ THE ORDER OF WORK IS: make `at_fvg` and `at_rejection_block` find what the
-# user finds, THEN drop order block. Flip this to MENTOR_ONLY to enable.
+# It was held back because switching it on loses 9 labelled setups, 5 of them
+# ones they said TAKE. But chasing those showed the loss is NOT a detector
+# defect. On BNB 2023-06-14 they marked an FVG; the gap had already been tapped
+# twice before C1 (12 June reached its edge at 239.30, 13 June went inside at
+# 247.00), so by their OWN written rule -- "once an FVG is tapped it is USED UP"
+# -- it was spent. Our detector was right and the marking was the loose reading.
+# Asked which way to go, they said to follow the rules. So: a setup whose only
+# level is an order block has no key level he would trade, and does not qualify.
+#
+# P&L cost of this is nil either way: 1d +0.528 -> +0.567, 1w and 4h fractionally
+# worse, every move inside noise (t38.log).
 MENTOR_ONLY = ("oldhl", "fvg", "rejblock")
-CRT_KL_TYPES = None
+CRT_KL_TYPES = MENTOR_ONLY
 
 RANGE_TOL = 0.05   # two swing highs (and lows) within 5% = bounded, not trending.
                    # Calibrated on BTC daily: 2% never fires, 5% labels ~16% of
