@@ -92,6 +92,32 @@ OLDHL_MAX_TOUCHES = None
 # one they had marked -- caught only because their marking was the yardstick.
 MIN_FVG_RANGE_MULT = 0.03
 
+# Does the FVG have to point the same way as the trade?
+#
+# We required it: a LONG only counts a BULLISH gap. But the source never says
+# that -- it says C1 TAPS a gap and C2 then sweeps C1 [part1 @36:48]. On BNB
+# 2023-06-14 the user marked an FVG unprompted; the only gap there is the
+# BEARISH 239.30-255.70 (6.97% of price) left by the 9-11 June collapse, and
+# C1's high of 252.80 reaches straight into it. Our direction filter threw it
+# away and the setup fell back on "equal highs/lows" -- a level he never
+# mentions -- so it was one of the five TAKEs lost when we tried to restrict to
+# his three types.
+#
+# TESTED AND REVERTED. It does NOT rescue BNB (see below) and it invents FVGs on
+# two setups the user said had no level at all (#3 ETH, #5 BTC). No evidence for
+# it, so matching-direction only.
+#
+# WHY BNB IS ACTUALLY MISSED, AND WHY IT IS NOT OUR BUG: the gap formed 9-11
+# June; 12 June already reached its lower edge (high 239.30) and 13 June went
+# well inside (high 247.00). C1 on 14 June is the THIRD candle to touch it. By
+# the user's OWN written rule -- "once an FVG is tapped it is USED UP, never use
+# the same FVG as a key level twice" -- that gap was spent before C1 existed.
+# Our first-touch check is applying THEIR rule correctly.
+#
+# => the BNB disagreement is between two of the user's own rules, not a defect.
+# Ask them which one wins before changing anything here.
+FVG_ANY_DIRECTION = False
+
 # An old high/low only counts if it is still INTACT -- nothing between the swing
 # and the setup has already traded beyond it.
 #
@@ -220,15 +246,15 @@ def at_fvg(df, i, direction, lookback=15):
         a = k - 2
         if a < 0:
             break
-        if direction == "LONG" and h[a] < l[k]:                 # bullish FVG
-            bottom, top = float(h[a]), float(l[k])
+        if (direction == "LONG" or FVG_ANY_DIRECTION) and h[a] < l[k]:
+            bottom, top = float(h[a]), float(l[k])              # bullish gap
             if top - bottom < _min_gap(df, i):                  # not a gap
                 continue
             filled = l[k + 1:i].min() <= bottom if i > k + 1 else False
             if not filled and not _tapped_before(h, l, k, i, bottom, top)                     and not (hi_i < bottom or lo_i > top):
                 return {"bottom": bottom, "top": top}
-        if direction == "SHORT" and l[a] > h[k]:                # bearish FVG
-            bottom, top = float(h[k]), float(l[a])
+        if (direction == "SHORT" or FVG_ANY_DIRECTION) and l[a] > h[k]:
+            bottom, top = float(h[k]), float(l[a])              # bearish gap
             if top - bottom < _min_gap(df, i):                  # not a gap
                 continue
             filled = h[k + 1:i].max() >= top if i > k + 1 else False
