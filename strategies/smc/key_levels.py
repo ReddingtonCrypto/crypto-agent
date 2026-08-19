@@ -65,6 +65,68 @@ def _swings(df, i, swing_lb, swings):
 # AND removes more junk. See at_old_high_low.
 OLDHL_MAX_GAP_MULT = 1.0
 
+# How many times price may have traded THROUGH an old high/low before it stops
+# counting as a level. None = unlimited (today's behaviour).
+#
+# Source backing: part1 @1:14:02 -- "if the FVG is closed [filled], then we will
+# go to the old highs and lows" -- a level that has been used is no longer the
+# level. Their own written rule says the same for FVGs ("once an FVG is tapped
+# it is USED UP"), which we already implement as a first-touch rule. The
+# untested extension is the same logic for old highs and lows.
+# Feature scan, n=30: levels the user rejected had been touched 4.22 times vs
+# 2.25 for the ones they accepted (t=-1.79 -- a lead, not a finding).
+OLDHL_MAX_TOUCHES = None
+
+# The smallest gap that counts as an FVG, as a fraction of the MEDIAN CANDLE
+# RANGE. A multiple, not a percentage of price, so it scales per timeframe.
+#
+# Without it we credited a 41,479-41,499 gap on BTC daily -- 20 dollars, 0.049%
+# of price -- and reported it as the setup's key level. Marking the same chart
+# from the definitions alone, the user said "I cannot identify a valid key
+# level". Genuine gaps in the same window measured 1.28-5.41% of price.
+# CALIBRATED AGAINST THE TWO GAPS THEY JUDGED THEMSELVES, on the same BTC daily
+# chart, which bracket the answer:
+#   the gap they MARKED as valid   86 pts  0.223% of price  0.058x median range
+#   the gap CIA invented (junk)    20 pts  0.050% of price  0.010x median range
+# 0.03 sits between them. My first attempt at 0.10 was too high and killed the
+# one they had marked -- caught only because their marking was the yardstick.
+MIN_FVG_RANGE_MULT = 0.03
+
+# An old high/low only counts if it is still INTACT -- nothing between the swing
+# and the setup has already traded beyond it.
+#
+# Rejected once as "too strict" (18 -> 1 on BTC daily) but that was BEFORE the
+# proximity rule landed; on top of proximity it is far cheaper. And the user's
+# own marking gives it a concrete case: on ETH 2023-02-17 we named the 2 Feb
+# high of 1714.68 while 16 Feb had ALREADY traded to 1742.97 straight through
+# it. The genuine untaken high was 1742.97 and price never reached it. Their
+# verdict, from the definitions alone: "no key level here -- the previous high
+# was not taken." Same mechanism as OLDHL_MAX_TOUCHES and as the source's "if
+# the FVG is closed, then we will go to the old highs and lows".
+#
+# ⚠️ MEASURED AND TURNED OFF. It fixes the two setups they said had no level,
+# and it destroys ten they said to TAKE -- including four where they said "key
+# levels are fine" in as many words (ADA 1w 2024-04-22, BNB 1w 2025-05-05,
+# LINK 1d 2023-12-02, DOGE 1d 2023-09-10). Turning it off restores 7 of 8;
+# off AND with the coarse swing lookback, 8 of 8. `journal.py check` caught it:
+# coverage 81 -> 56 with 10 lost TAKEs.
+#
+# So their own labels CONFLICT here: the rule that explains their "no key level"
+# calls contradicts their "key levels are fine" calls. Not resolvable from the
+# data we have. Left off, one flag away.
+OLDHL_REQUIRE_INTACT = False
+
+
+def _min_gap(df, i, mult=None):
+    """Smallest acceptable FVG height at bar i, in price units."""
+    mult = MIN_FVG_RANGE_MULT if mult is None else mult
+    h = df["high"].to_numpy(); l = df["low"].to_numpy()
+    a = max(0, i - 20)
+    if i <= a:
+        return 0.0
+    r = sorted(float(h[k] - l[k]) for k in range(a, i))
+    return mult * r[len(r) // 2]
+
 
 def at_old_high_low(df, i, direction, lookback=40, swing_lb=2, swings=None,
                     max_gap_mult=OLDHL_MAX_GAP_MULT, c1_index=None):
@@ -104,15 +166,33 @@ def at_old_high_low(df, i, direction, lookback=40, swing_lb=2, swings=None,
     ranges = sorted(float(h[k] - l[k]) for k in range(a, i))
     near = max_gap_mult * ranges[len(ranges) // 2]
 
+    def _intact(idx, p):
+        if not OLDHL_REQUIRE_INTACT or idx + 1 >= i:
+            return True
+        seg = h[idx + 1:i] if short else l[idx + 1:i]
+        return (float(seg.max()) <= p) if short else (float(seg.min()) >= p)
+
     src = highs if short else lows
     cands = [p for (idx, p) in src
              if i - lookback <= idx <= i - swing_lb
              and idx != c1_index
              and (p < h[i] if short else p > l[i])
-             and abs(p - wick) <= near]
+             and abs(p - wick) <= near
+             and _intact(idx, p)]
     if not cands:
         return None
     lvl = max(cands) if short else min(cands)     # the nearest one the wick took
+
+    # A level that has already been USED is no longer a level -- the resting
+    # orders behind it have been consumed. See OLDHL_MAX_TOUCHES.
+    if OLDHL_MAX_TOUCHES is not None:
+        idx = [k for (k, p) in src if abs(p - lvl) < 1e-12]
+        if idx:
+            k0 = idx[-1]
+            touches = sum(1 for m in range(k0 + 1, i)
+                          if float(h[m]) >= lvl >= float(l[m]))
+            if touches > OLDHL_MAX_TOUCHES:
+                return None
     typ = ("TBS" if (max(o[i], c[i]) > lvl if short else min(o[i], c[i]) < lvl)
            else "TWS")
     return {"level": float(lvl), "type": typ}
@@ -142,11 +222,15 @@ def at_fvg(df, i, direction, lookback=15):
             break
         if direction == "LONG" and h[a] < l[k]:                 # bullish FVG
             bottom, top = float(h[a]), float(l[k])
+            if top - bottom < _min_gap(df, i):                  # not a gap
+                continue
             filled = l[k + 1:i].min() <= bottom if i > k + 1 else False
             if not filled and not _tapped_before(h, l, k, i, bottom, top)                     and not (hi_i < bottom or lo_i > top):
                 return {"bottom": bottom, "top": top}
         if direction == "SHORT" and l[a] > h[k]:                # bearish FVG
             bottom, top = float(h[k]), float(l[a])
+            if top - bottom < _min_gap(df, i):                  # not a gap
+                continue
             filled = h[k + 1:i].max() >= top if i > k + 1 else False
             if not filled and not _tapped_before(h, l, k, i, bottom, top)                     and not (hi_i < bottom or lo_i > top):
                 return {"bottom": bottom, "top": top}
@@ -189,6 +273,8 @@ def fvg_beside_level(df, i, direction, level, lookback=15, gap_pct=0.02):
         elif l[a] > h[k]:
             bottom, top = float(h[k]), float(l[a])
         else:
+            continue
+        if top - bottom < _min_gap(df, i):                      # not a gap
             continue
         if direction == "SHORT" and level < bottom <= level + span:
             return {"bottom": bottom, "top": top}
@@ -414,9 +500,21 @@ def count_key_levels(df, i, direction,
     # [part1_foundations @36:48-37:07]. detect_crt_10 already checked C1; the
     # LABEL was still being computed on the sweep bar, so alerts disagreed with
     # the rule and with the user's own reading.
-    if "fvg" in types and at_fvg(df, i if c1_index is None else c1_index,
-                                 direction):
-        labels.append("FVG")
+    #
+    # AND an FVG sitting just BEYOND the swept level counts too. Their own
+    # written rule: "the FVG bonus is ADJACENCY -- a gap sitting right above the
+    # swept high / below the swept low." We already detected that as the A+ flag
+    # but never let it QUALIFY a setup, so BTC 2022-05-01 qualified on an order
+    # block -- a level he says he does not trade -- while a real bearish FVG at
+    # 38,795-38,881 sat right above C1's high and C2 poked straight into it.
+    # The user marked that FVG unprompted from the definitions alone; it is the
+    # third time the same miss has come up (Round 2 #6 and #14).
+    if "fvg" in types:
+        j = i if c1_index is None else c1_index
+        lvl = (float(df["high"].to_numpy()[j]) if direction == "SHORT"
+               else float(df["low"].to_numpy()[j]))
+        if at_fvg(df, j, direction) or fvg_beside_level(df, i, direction, lvl):
+            labels.append("FVG")
     if "rejblock" in types and at_rejection_block(df, i, direction, swings=swings):
         labels.append("rejection block")
     if "ob" in types and at_order_block(df, i, direction):

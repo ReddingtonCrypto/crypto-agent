@@ -644,6 +644,39 @@ def _premium_discount(df, i, direction, lookback=60):
 # separate it. DO NOT SHIP ON THE CORRECTNESS ARGUMENT ALONE.
 MIN_SWEEP_DEPTH = 0.0
 
+# Swing lookback used for KEY LEVELS only (the trend keeps swing_lb=3). See the
+# note in _build_crt_v3.
+KL_SWING_LB = 3
+# Tested at 1 as well: 1 is what lets `find_swings` see a high made two candles
+# ago, which is the kind of level the user names (BTC 2022-02-26, the 24 Feb
+# high of 39,843 — invisible at lookback 2, 3 and 5). But with intactness off,
+# 3 scores the same on their marked cases AND keeps full label coverage
+# (81/81 vs 80/81, where 1 lost a setup they said TAKE), so 3 stays.
+
+# THE ONLY LEVEL TYPES HE ACTUALLY TRADES.
+#   "Personally, I use the old highs, old lows and FVG and rejection blocks."
+#     [part1 @1:24:19]
+#   "You can use order block. That is also a demand. But I do not use it."
+#     [part1 @1:04:41]
+# Order block, equal highs/lows and displacement are OURS — the last two from
+# the ICT work, never mentioned by him. On the P&L they are a wash (1d +0.528 ->
+# +0.567, 1w and 4h fractionally worse, all inside noise), so this is decided on
+# SOURCE FIDELITY: marking three setups blind from the definitions alone, the
+# user found a real FVG or rejection block on every one that CIA had qualified
+# using only an order block.
+#
+# ⚠️ NOT ENABLED YET, AND THE REASON MATTERS. Switched on, it loses 9 labelled
+# setups and FIVE of them are ones the user said TAKE — including SOL 1w
+# 2026-06-01 ("valid, still running, all good") and BNB 1d 2023-06-14, both
+# setups where THEY THEMSELVES named an FVG or a rejection block that our
+# detectors cannot find. So order block is currently standing in for levels we
+# fail to detect, and removing it just removes the setup.
+#
+# ⇒ THE ORDER OF WORK IS: make `at_fvg` and `at_rejection_block` find what the
+# user finds, THEN drop order block. Flip this to MENTOR_ONLY to enable.
+MENTOR_ONLY = ("oldhl", "fvg", "rejblock")
+CRT_KL_TYPES = None
+
 RANGE_TOL = 0.05   # two swing highs (and lows) within 5% = bounded, not trending.
                    # Calibrated on BTC daily: 2% never fires, 5% labels ~16% of
                    # bars RANGE and eats into MIXED rather than into BULL/BEAR,
@@ -685,7 +718,8 @@ def _trend_structure(df, i, swing_lb=3):
 
 def detect_crt_v3(df, tf="1d", c1_lookback=12, min_confluence=2,
                   require_pd=False, swing_lb=3, require_trend=False,
-                  min_stop_pct=None, min_rr=None, min_net_pct=None):
+                  min_stop_pct=None, min_rr=None, min_net_pct=None,
+                  kl_types=None):
     """A CRT on the LAST CLOSED candle. Returns a setup dict or None.
 
     `min_confluence=0` gives the unfiltered feed — every real CRT, no key-level
@@ -781,7 +815,8 @@ def detect_crt_v3(df, tf="1d", c1_lookback=12, min_confluence=2,
 
     for cand in candidates:
         s = _build_crt_v3(df, i, cand, med, swing_lb, require_pd, require_trend,
-                          min_confluence, min_stop_pct, min_rr, min_net_pct)
+                          min_confluence, min_stop_pct, min_rr, min_net_pct,
+                          kl_types)
         if s is not None:
             s["nested"] = len(candidates) > 1
             return s
@@ -789,7 +824,7 @@ def detect_crt_v3(df, tf="1d", c1_lookback=12, min_confluence=2,
 
 
 def _build_crt_v3(df, i, cand, med, swing_lb, require_pd, require_trend,
-                  min_confluence, min_stop_pct, min_rr, min_net_pct):
+                  min_confluence, min_stop_pct, min_rr, min_net_pct, kl_types=None):
     """Apply every gate to ONE C1 candidate. Returns the setup dict or None."""
     h = df["high"].to_numpy(); l = df["low"].to_numpy()
     o = df["open"].to_numpy(); c = df["close"].to_numpy()
@@ -809,8 +844,23 @@ def _build_crt_v3(df, i, cand, med, swing_lb, require_pd, require_trend,
 
     # The key level QUALIFIES the CRT — it is not the trigger.
     highs, lows = find_swings(df, lookback=swing_lb)
-    conf, labels = key_levels.count_key_levels(df, i, direction,
-                                               swings=(highs, lows), c1_index=j)
+    # KEY LEVELS USE A FINER SWING LOOKBACK THAN THE TREND DOES.
+    #
+    # `swing_lb=3` needs three bars either side to confirm a pivot, so a high
+    # made two candles ago is invisible -- and those are exactly the levels the
+    # user names. On BTC 2022-02-26 they marked the 24 Feb high of 39,843; at
+    # lookback 2, 3 and 5 `find_swings` does not see it at all, only at 1. That
+    # is the ROOT CAUSE of the old-high/low trouble: unable to see the recent
+    # level, the detector reached back to older, deader ones, and the proximity
+    # and intactness rules were patches over that.
+    #
+    # Scored on the four setups the user marked from the definitions alone:
+    #   lookback 3  -> right on 2 of 4     lookback 1 -> right on 3 of 4
+    # The TREND still uses `swing_lb`, so market structure is untouched.
+    kl_highs, kl_lows = find_swings(df, lookback=KL_SWING_LB)
+    conf, labels = key_levels.count_key_levels(
+        df, i, direction, swings=(kl_highs, kl_lows), c1_index=j,
+        **({"types": t} if (t := kl_types or CRT_KL_TYPES) else {}))
     if conf < min_confluence:
         return None
 
