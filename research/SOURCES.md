@@ -39,15 +39,28 @@ Claims to be the originator of CRT + Turtle Soup. 16 videos pulled 2026-08-09.
 - **✅ LINKS RECOVERED 2026-08-20** — channel `https://www.youtube.com/@Romeotpt` (romeotpt.com).
   All 16 IDs in `research/crt-transcripts/_channel_list.txt`, matched to our transcripts
   by title + duration. **6.32 h total.**
-- **video:** ❌ not downloaded yet — awaiting the user's go-ahead (~3-6 GB at 720p)
-- **audio:** ❌ none
-- **visuals:** ❌ none — this is the big gap vs S1
-- **text:** ✅ 16 transcripts, ~41,500 words, `research/crt-transcripts/v01..v16*.txt`
-  — but these are **yt-dlp auto-subs, cleaned, so ALL TIMESTAMPS WERE STRIPPED**
-  and each file is a single unbroken line. Good enough to quote, useless for
-  jumping to a moment in the video.
+- **video:** ✅ **all 16 downloaded 2026-08-20** to `D:\CRT romeo\vNN_*.mp4`, 1.2 GB,
+  1080p where offered. Every file's duration ffprobe-verified against the channel
+  listing (all within 1 s = YouTube rounding), so timestamps are trustworthy.
+- **audio:** not extracted — not needed, see below.
+- **visuals:** ⏳ next step. `research/harness/sheets_romeo.py` contact-sheets each
+  video at 1 frame/min tiled 5x5 (25 min of footage per readable image); pull
+  full-res single frames only at the interesting moments.
+- **text:** ⚠️ TWO SETS, do not confuse them.
+  - **OLD (2026-08-09):** `research/crt-transcripts/v01..v16*.txt`, ~41,500 words.
+    yt-dlp auto-subs that were cleaned, so **ALL TIMESTAMPS WERE STRIPPED** and
+    each file is one unbroken line. Quotable, but you can never jump to the
+    moment on the chart. This is what motivated the re-ingest.
+  - **NEW (2026-08-20):** the user is supplying YouTube's own transcripts, WITH
+    timestamps, into `D:\CRT romeo\transcripts\vNN.txt`. Prefer these. Local
+    whisper was written (`research/harness/transcribe_romeo.py`) but NOT run —
+    YouTube's own text is more accurate and cost nothing.
 - **rules extracted:** partially, folded into `research/crt-manual/_RULEBOOK.md`
-- **code:** none. Romeo's teaching is **not** what the live agent trades.
+- **code:** none yet. **CRT 2.0 (`ENABLE_CRT_20`) will be built from this and run
+  ALONGSIDE CRT 1.0, not replacing it** — separate strategy slot, separate label,
+  so the journal can say which teacher's version actually earns. Agreed 2026-08-20.
+- ⚠️ **Romeo's "80-85% world record accuracy" claim is marketing, not a measurement.**
+  Every rule of his is a hypothesis to be tested exactly like HK's.
 
 | id | file | read as of 2026-08-09? |
 |---|---|---|
