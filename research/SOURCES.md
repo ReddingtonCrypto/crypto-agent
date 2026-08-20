@@ -43,9 +43,10 @@ Claims to be the originator of CRT + Turtle Soup. 16 videos pulled 2026-08-09.
   1080p where offered. Every file's duration ffprobe-verified against the channel
   listing (all within 1 s = YouTube rounding), so timestamps are trustworthy.
 - **audio:** not extracted — not needed, see below.
-- **visuals:** ⏳ next step. `research/harness/sheets_romeo.py` contact-sheets each
-  video at 1 frame/min tiled 5x5 (25 min of footage per readable image); pull
-  full-res single frames only at the interesting moments.
+- **visuals:** ✅ **DONE 2026-08-20.** All 16 contact-sheeted at 1 frame/min, 5x5
+  tiles = 22 sheets, 15 MB, `D:\CRT romeo\_sheets\vNN_sheet_NN.png`. Tile (r,c) of
+  sheet k = minute `k*25 + r*5 + c`; verified against the transcripts to the minute.
+  Regenerate with `research/harness/sheets_romeo.py`.
 - **text:** ⚠️ TWO SETS, do not confuse them.
   - **OLD (2026-08-09):** `research/crt-transcripts/v01..v16*.txt`, ~41,500 words.
     yt-dlp auto-subs that were cleaned, so **ALL TIMESTAMPS WERE STRIPPED** and
@@ -55,7 +56,12 @@ Claims to be the originator of CRT + Turtle Soup. 16 videos pulled 2026-08-09.
     timestamps, into `D:\CRT romeo\transcripts\vNN.txt`. Prefer these. Local
     whisper was written (`research/harness/transcribe_romeo.py`) but NOT run —
     YouTube's own text is more accurate and cost nothing.
-- **rules extracted:** ❌ **NONE.** Verified 2026-08-20: `_RULEBOOK.md` cites only
+- **rules extracted:** ✅ **`research/crt-transcripts/_ROMEO_vs_HK.md`** — all 16
+  transcripts read in full and all 22 sheets reviewed, 2026-08-20. ~1,250 lines,
+  220 `vNN@mm:ss` citations, a consolidated 9-layer model spec, the Romeo-vs-HK
+  comparison, three corrections I had to make along the way, and the five known
+  gaps. **Read the consolidated spec at the end first.**
+- **previously:** ❌ NONE. Verified 2026-08-20: `_RULEBOOK.md` cites only
   `part1..part4` (= HK). Not one Romeo citation anywhere in it. An earlier line here
   claiming his findings were "partially folded in" was wrong. **Everything CIA trades
   today comes from HK; Romeo has contributed nothing to the code.** That is precisely
