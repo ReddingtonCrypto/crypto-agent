@@ -55,7 +55,11 @@ Claims to be the originator of CRT + Turtle Soup. 16 videos pulled 2026-08-09.
     timestamps, into `D:\CRT romeo\transcripts\vNN.txt`. Prefer these. Local
     whisper was written (`research/harness/transcribe_romeo.py`) but NOT run —
     YouTube's own text is more accurate and cost nothing.
-- **rules extracted:** partially, folded into `research/crt-manual/_RULEBOOK.md`
+- **rules extracted:** ❌ **NONE.** Verified 2026-08-20: `_RULEBOOK.md` cites only
+  `part1..part4` (= HK). Not one Romeo citation anywhere in it. An earlier line here
+  claiming his findings were "partially folded in" was wrong. **Everything CIA trades
+  today comes from HK; Romeo has contributed nothing to the code.** That is precisely
+  what makes a clean HK-vs-Romeo comparison possible.
 - **code:** none yet. **CRT 2.0 (`ENABLE_CRT_20`) will be built from this and run
   ALONGSIDE CRT 1.0, not replacing it** — separate strategy slot, separate label,
   so the journal can say which teacher's version actually earns. Agreed 2026-08-20.
