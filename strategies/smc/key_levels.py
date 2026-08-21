@@ -118,6 +118,38 @@ MIN_FVG_RANGE_MULT = 0.03
 # Ask them which one wins before changing anything here.
 FVG_ANY_DIRECTION = False
 
+# Does a gap C1 CREATES count as the setup's key level, as well as one it taps?
+#
+# The case: LTC weekly, C1 2023-01-09. A bullish gap 71.83-78.09 forms with C1
+# as its THIRD candle, and the user marked "the key level was FVG". We report
+# only old high/low, because `at_fvg` looks for a gap C1 reaches INTO and
+# `fvg_beside_level` looks just beyond the SWEPT level -- and on a SHORT that
+# gap sits on the far side, below C1, where price came FROM.
+#
+# So this counts a gap whose third candle IS C1, regardless of which side it
+# falls on. That is close to FVG_ANY_DIRECTION, which failed; measured here on
+# its own so the two are not confused.
+FVG_CREATED_BY_C1 = True
+
+
+def fvg_created_at(df, j, mult=None):
+    """A 3-candle gap whose THIRD candle is bar j. Returns (bottom, top) or
+    None. Direction-agnostic by construction -- C1 makes the gap, it does not
+    react to one."""
+    h = df["high"].to_numpy(); l = df["low"].to_numpy()
+    if j < 2:
+        return None
+    lo2, hi2 = float(h[j - 2]), float(l[j - 2])
+    if float(l[j]) > lo2:                                   # bullish gap
+        bottom, top = lo2, float(l[j])
+    elif float(h[j]) < hi2:                                 # bearish gap
+        bottom, top = float(h[j]), hi2
+    else:
+        return None
+    if top - bottom < _min_gap(df, j, mult):
+        return None
+    return bottom, top
+
 # An old high/low only counts if it is still INTACT -- nothing between the swing
 # and the setup has already traded beyond it.
 #
@@ -539,7 +571,9 @@ def count_key_levels(df, i, direction,
         j = i if c1_index is None else c1_index
         lvl = (float(df["high"].to_numpy()[j]) if direction == "SHORT"
                else float(df["low"].to_numpy()[j]))
-        if at_fvg(df, j, direction) or fvg_beside_level(df, i, direction, lvl):
+        if (at_fvg(df, j, direction)
+                or fvg_beside_level(df, i, direction, lvl)
+                or (FVG_CREATED_BY_C1 and fvg_created_at(df, j))):
             labels.append("FVG")
     if "rejblock" in types and at_rejection_block(df, i, direction, swings=swings):
         labels.append("rejection block")
