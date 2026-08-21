@@ -13,3 +13,4 @@ history/backups/
 # Third-party course transcripts - kept locally for research, not redistributed
 research/*
 !research/SOURCES.md
+_crt_old_*.py
