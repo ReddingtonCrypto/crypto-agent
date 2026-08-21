@@ -746,6 +746,13 @@ CRT10_STATS = {
 }
 
 
+def _rule_a_level(s):
+    """The price a CLOSE beyond which kills the CRT — C1's body edge on the far
+    side from the target. Derived from the two targets, so it needs no extra
+    state: TP1 is the body midpoint and TP2 its far edge."""
+    return 2 * s["tp1"] - s["tp2"]
+
+
 def _crt10_alert_text(coin, htf, s):
     """Telegram body for a CRT 1.0 setup. The entry is a LIMIT on the lower
     timeframe — price has to come back to the retest level to fill it."""
@@ -764,6 +771,20 @@ def _crt10_alert_text(coin, htf, s):
         f"<code>C1body {s['body_low']:.6g} — {s['body_high']:.6g}  (targets)</code>",
         f"<code>Swept {s['swept']:.6g}  ({s['ltf']} liquidity taken)</code>",
         f"<code>CISD  {s['cisd_line']:.6g}  (close beyond this = trigger)</code>",
+        # RULE A, SHOWN NOT ENFORCED. A CRT dies when a candle CLOSES beyond
+        # C1's body on the far side [part1 @33:43]. Our stop sits beyond C2's
+        # swept extreme, which is FURTHER OUT than that body edge -- so a CRT
+        # can be dead by the rulebook while the stop is still untouched. That
+        # happens on ~30% of setups.
+        #
+        # Measured from the trigger bar onward, holding after Rule A fires
+        # reaches a target 41% of the time on daily and 47% on 4h, and stops
+        # out 57% / 51%. Roughly -0.11R on daily, +0.03R on 4h -- expectancy
+        # neutral, and split by pairing like everything else. So it is DISPLAYED
+        # and never enforced: cancelling would forfeit the 25-30% that still run
+        # to full target, and deleting setups the user would take is this
+        # project's most repeated way of going wrong.
+        f"<code>Dead  {_rule_a_level(s):.6g}  ({htf} close beyond = CRT invalid)</code>",
         f"🕯 CISD {s['cisd_bars']} candle(s) after the sweep on {s['ltf']}",
         f"R:R ≈ {s['rr']:.2f}  ·  booked out in full ≈ {s['net_pct']:.2f}%",
     ]

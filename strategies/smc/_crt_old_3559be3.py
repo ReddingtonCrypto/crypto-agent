@@ -716,22 +716,6 @@ def _trend_structure(df, i, swing_lb=3):
     hi_gap = abs(highs[-1][1] - highs[-2][1]) / max(highs[-2][1], 1e-9)
     lo_gap = abs(lows[-1][1] - lows[-2][1]) / max(lows[-2][1], 1e-9)
     if hi_gap <= RANGE_TOL and lo_gap <= RANGE_TOL:
-        # A RANGE ALSO REQUIRES PRICE TO STILL BE INSIDE IT.
-        #
-        # The swing test above reads only COMPLETED swings, so it is blind to
-        # where price actually is now. On BTC 2022-06-13 the last two swing
-        # highs (31,460 / 32,399 / 31,766) and lows (28,654 / 28,020 / 29,282)
-        # all sat inside RANGE_TOL and the function returned RANGE -- while
-        # price was 22,136, twenty-one percent BELOW the lowest of those lows,
-        # after a two-week 30% collapse. The user, reading the same chart:
-        # "against the trend".
-        #
-        # A range price has already left is not a range, it is a break.
-        band_hi = max(highs[-1][1], highs[-2][1])
-        band_lo = min(lows[-1][1], lows[-2][1])
-        px = float(sub["close"].iloc[-1])
-        if px > band_hi * (1 + RANGE_TOL) or px < band_lo * (1 - RANGE_TOL):
-            return "MIXED"
         return "RANGE"
     return "MIXED"
 
@@ -1015,9 +999,6 @@ def ltf_confirms(ltf_df, direction, since_ts, lookahead=60):
 # --------------------------------------------------------------------------- #
 
 CRT10_PAIRS = {"1M": "1d", "1w": "4h", "1d": "1h", "4h": "15m"}
-# Bar length per timeframe, so an entry search can start at C2's CLOSE.
-_TF_MS = {"1M": 2_592_000_000, "1w": 604_800_000, "1d": 86_400_000,
-          "4h": 14_400_000, "1h": 3_600_000, "15m": 900_000}
 CRT10_MIN_RR = 1.0            # Was 2.0. Point-in-time on 103 coins with the
                               # corrected stop: rr>=0 +0.637%/tr t=+5.36 breadth
                               # 67/98 | rr>=1 +0.698 t=+5.82 breadth 63/98 |
@@ -1229,19 +1210,7 @@ def detect_crt_10(htf_df, ltf_df, tf, min_confluence=1,
         return None
     # the HTF extreme C2 actually swept -- the LTF sweep has to be near it
     htf_level = s["crt_low"] if s["direction"] == "LONG" else s["crt_high"]
-    # SEARCH FROM THE C2 *CLOSE*, NOT ITS OPEN.
-    #
-    # `signal_ts` is C2's OPEN. Starting there let the CISD be found on LTF bars
-    # that printed DURING C2 -- before the HTF CRT was confirmed at all. The
-    # alert then arrives with an entry level that price may already have been
-    # through. Measured over the 81-setup daily review: 61 of 81 alerts carried
-    # a CISD up to 12 LTF bars old, and in 30 of them price had ALREADY traded
-    # through the entry before we alerted. Only 28 of the 81 entries were
-    # achievable as quoted.
-    #
-    # A CRT does not exist until C2 closes, so neither can its entry.
-    since = s["signal_ts"] + _TF_MS.get(tf, 0)
-    e = crt10_entry(ltf_df, s["direction"], since, s["tp1"],
+    e = crt10_entry(ltf_df, s["direction"], s["signal_ts"], s["tp1"],
                     htf_level=htf_level)
     if not e:
         return None
