@@ -646,7 +646,7 @@ MIN_SWEEP_DEPTH = 0.0
 
 # Swing lookback used for KEY LEVELS only (the trend keeps swing_lb=3). See the
 # note in _build_crt_v3.
-KL_SWING_LB = 3
+KL_SWING_LB = 1
 # Tested at 1 as well: 1 is what lets `find_swings` see a high made two candles
 # ago, which is the kind of level the user names (BTC 2022-02-26, the 24 Feb
 # high of 39,843 — invisible at lookback 2, 3 and 5). But with intactness off,
